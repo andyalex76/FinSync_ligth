@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  validate:
+    name: Lint, Type-Check & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint check (ESLint)
+        run: npm run lint
+
+      - name: Type check (TypeScript)
+        run: npm run type-check
+
+      - name: Run unit tests (Vitest)
+        run: npm test
+
+      - name: Production build (Vite)
+        run: npm run build
+
+  backend-test:
+    name: Backend Lint & Test (Python 3.12)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Run backend tests (pytest)
+        env:
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          ADMIN_TOKEN: ci-test-admin-token
+          INTERNAL_API_KEY: ci-test-internal-worker-key
+        run: pytest backend/test_api.py backend/test_bot.py -v

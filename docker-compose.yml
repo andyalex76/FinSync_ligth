@@ -1,0 +1,202 @@
+# =====================================================================
+# FinSync (Семейный Бюджет) - Self-Hosted Production Stack
+# Constraints: 100% local processing, no external OCR/LLM APIs, VPS friendly
+# Network Segmentation:
+# - db_net (internal): strictly isolated for PostgreSQL and Backend API
+# - queue_net: Redis broker, Backend API, and OCR Worker
+# - app_net: Backend API, Telegram Bot, and Dashboard Web/PWA
+# =====================================================================
+
+services:
+  # 1. Primary Relational Database (PostgreSQL 16)
+  postgres:
+    image: postgres:16-alpine
+    container_name: family_budget_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-family_budget}
+      POSTGRES_USER: ${POSTGRES_USER:-budget_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vps_secure_password_123}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-budget_admin} -d ${POSTGRES_DB:-family_budget}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - db_net
+
+  # 2. Redis Message Broker & Cache
+  redis:
+    image: redis:7-alpine
+    container_name: family_budget_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-redis_pass_123}"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_pass_123}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - queue_net
+
+  # 3. FastAPI Core Backend (Gateway across DB, Queue, and App networks)
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: family_budget_api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-budget_admin}:${POSTGRES_PASSWORD:-vps_secure_password_123}@postgres:5432/${POSTGRES_DB:-family_budget}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_pass_123}@redis:6379/0
+      UPLOAD_DIR: /app/storage/uploads
+      BASE_CURRENCY: ${BASE_CURRENCY:-RUB}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      TELEGRAM_ADMIN_CHAT_IDS: ${TELEGRAM_ADMIN_CHAT_IDS:-}
+    volumes:
+      - uploads_data:/app/storage/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:8000/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - db_net
+      - queue_net
+      - app_net
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # 4. Local OCR Worker (Tesseract OCR rus+eng - Isolated from database)
+  ocr_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: family_budget_ocr_worker
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_pass_123}@redis:6379/0
+      BACKEND_API_URL: http://backend:8000
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      UPLOAD_DIR: /app/storage/uploads
+      TESSDATA_PREFIX: /usr/share/tesseract-ocr/5/tessdata
+      OMP_THREAD_LIMIT: "1"
+    volumes:
+      - uploads_data:/app/storage/uploads
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - queue_net
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          memory: 128M
+
+  # 5. Telegram Bot (aiogram 3 - Isolated from database)
+  telegram_bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    container_name: family_budget_bot
+    restart: unless-stopped
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      BACKEND_API_URL: http://backend:8000
+      APP_URL: ${APP_URL:-https://budget.your-domain.ru}
+      SECRET_KEY: ${SECRET_KEY}
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - app_net
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+
+  # 6. Web / PWA Dashboard (Isolated from database)
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: family_budget_dashboard
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      NEXT_PUBLIC_API_URL: /api
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - app_net
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+
+volumes:
+  pg_data:
+  redis_data:
+  uploads_data:
+
+networks:
+  # 1. Database network: strictly isolated, only postgres and backend
+  db_net:
+    driver: bridge
+    internal: true
+  # 2. Asynchronous job queue network: redis, backend, and ocr_worker
+  queue_net:
+    driver: bridge
+  # 3. Application network: backend, telegram_bot, and dashboard web interface
+  app_net:
+    driver: bridge

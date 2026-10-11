@@ -1,0 +1,94 @@
+src/components/AddSavingGoalModal.tsx(2,44): error TS6133: 'Sparkles' is declared but its value is never read.
+src/components/AddSavingGoalModal.tsx(2,54): error TS6133: 'Building' is declared but its value is never read.
+src/components/AddSavingGoalModal.tsx(2,64): error TS6133: 'Percent' is declared but its value is never read.
+src/components/AddSavingGoalModal.tsx(2,73): error TS6133: 'Calendar' is declared but its value is never read.
+src/components/AddSavingGoalModal.tsx(3,43): error TS6133: 'FamilyMember' is declared but its value is never read.
+src/components/BudgetsTab.tsx(4,3): error TS6133: 'AlertTriangle' is declared but its value is never read.
+src/components/BudgetsTab.tsx(5,3): error TS6133: 'CheckCircle2' is declared but its value is never read.
+src/components/BudgetsTab.tsx(8,3): error TS6133: 'SlidersHorizontal' is declared but its value is never read.
+src/components/BudgetsTab.tsx(9,3): error TS6133: 'TrendingUp' is declared but its value is never read.
+src/components/BudgetsTab.tsx(10,3): error TS6133: 'ShieldAlert' is declared but its value is never read.
+src/components/BudgetsTab.tsx(15,3): error TS6133: 'Percent' is declared but its value is never read.
+src/components/BudgetsTab.tsx(24,23): error TS6133: 'formatMoneyCompact' is declared but its value is never read.
+src/components/BudgetsTab.tsx(24,60): error TS6133: 'kopecksToRubles' is declared but its value is never read.
+src/components/CategoryIcon.tsx(12,3): error TS6133: 'Coffee' is declared but its value is never read.
+src/components/CategoryIcon.tsx(13,3): error TS6133: 'Fuel' is declared but its value is never read.
+src/components/CategoryIcon.tsx(14,3): error TS6133: 'Film' is declared but its value is never read.
+src/components/CategoryIcon.tsx(15,3): error TS6133: 'Dumbbell' is declared but its value is never read.
+src/components/CategoryIcon.tsx(16,3): error TS6133: 'Briefcase' is declared but its value is never read.
+src/components/CategoryIcon.tsx(19,3): error TS6133: 'CreditCard' is declared but its value is never read.
+src/components/CategoryIcon.tsx(22,3): error TS6133: 'Gem' is declared but its value is never read.
+src/components/CategoryIcon.tsx(23,3): error TS6133: 'TrendingUp' is declared but its value is never read.
+src/components/CategoryIcon.tsx(24,3): error TS6133: 'Wallet' is declared but its value is never read.
+src/components/CategoryIcon.tsx(25,3): error TS6133: 'CircleDollarSign' is declared but its value is never read.
+src/components/EditTransactionModal.tsx(2,28): error TS6133: 'Calendar' is declared but its value is never read.
+src/components/EditTransactionModal.tsx(2,38): error TS6133: 'User' is declared but its value is never read.
+src/components/EditTransactionModal.tsx(2,44): error TS6133: 'Tag' is declared but its value is never read.
+src/components/FamilySetupWizard.tsx(3,3): error TS6133: 'Users' is declared but its value is never read.
+src/components/FamilySetupWizard.tsx(9,3): error TS6133: 'ShieldCheck' is declared but its value is never read.
+src/components/FamilySetupWizard.tsx(13,3): error TS6133: 'MessageSquare' is declared but its value is never read.
+src/components/MembersTab.tsx(3,3): error TS6133: 'Users' is declared but its value is never read.
+src/components/MembersTab.tsx(7,3): error TS6133: 'ShieldCheck' is declared but its value is never read.
+src/components/MembersTab.tsx(8,3): error TS6133: 'UserPlus' is declared but its value is never read.
+src/components/MembersTab.tsx(9,3): error TS6133: 'Coins' is declared but its value is never read.
+src/components/MembersTab.tsx(10,3): error TS6133: 'AlertCircle' is declared but its value is never read.
+src/components/OverviewTab.tsx(5,3): error TS6133: 'Calendar' is declared but its value is never read.
+src/components/OverviewTab.tsx(7,3): error TS6133: 'CheckCircle2' is declared but its value is never read.
+src/components/OverviewTab.tsx(8,3): error TS6133: 'Clock' is declared but its value is never read.
+src/components/OverviewTab.tsx(9,3): error TS6133: 'Sparkles' is declared but its value is never read.
+src/components/OverviewTab.tsx(12,3): error TS6133: 'ShieldCheck' is declared but its value is never read.
+src/components/OverviewTab.tsx(15,3): error TS6133: 'Server' is declared but its value is never read.
+src/components/OverviewTab.tsx(16,3): error TS6133: 'Database' is declared but its value is never read.
+src/components/OverviewTab.tsx(17,3): error TS6133: 'Cpu' is declared but its value is never read.
+src/components/OverviewTab.tsx(19,3): error TS6133: 'Activity' is declared but its value is never read.
+src/components/OverviewTab.tsx(24,3): error TS6133: 'Percent' is declared but its value is never read.
+src/components/OverviewTab.tsx(73,3): error TS6133: 'budgets' is declared but its value is never read.
+src/components/OverviewTab.tsx(80,3): error TS6133: 'onOpenScanModal' is declared but its value is never read.
+src/components/OverviewTab.tsx(101,9): error TS6133: 'totalSavingsTargetKopecks' is declared but its value is never read.
+src/components/OverviewTab.tsx(107,9): error TS6133: 'familyNetWorthKopecks' is declared but its value is never read.
+src/components/OverviewTab.tsx(166,9): error TS6133: 'currentUser' is declared but its value is never read.
+src/components/OverviewTab.tsx(508,23): error TS2322: Type '(value: number) => [string, string]' is not assignable to type 'Formatter<ValueType, NameType> & ((value: ValueType, name: NameType, item: TooltipPayloadEntry, index: number, payload: TooltipPayload) => ReactNode | [...])'.
+  Type '(value: number) => [string, string]' is not assignable to type 'Formatter<ValueType, NameType>'.
+    Types of parameters 'value' and 'value' are incompatible.
+      Type 'ValueType | undefined' is not assignable to type 'number'.
+        Type 'undefined' is not assignable to type 'number'.
+src/components/OverviewTab.tsx(572,19): error TS2322: Type '(v: number) => [string, string]' is not assignable to type 'Formatter<ValueType, NameType> & ((value: ValueType, name: NameType, item: TooltipPayloadEntry, index: number, payload: TooltipPayload) => ReactNode | [...])'.
+  Type '(v: number) => [string, string]' is not assignable to type 'Formatter<ValueType, NameType>'.
+    Types of parameters 'v' and 'value' are incompatible.
+      Type 'ValueType | undefined' is not assignable to type 'number'.
+        Type 'undefined' is not assignable to type 'number'.
+src/components/ReceiptScanModal.tsx(589,46): error TS18047: 'extractedData' is possibly 'null'.
+src/components/ReceiptScanModal.tsx(598,30): error TS18047: 'extractedData' is possibly 'null'.
+src/components/ReceiptScanModal.tsx(600,42): error TS2345: Argument of type '{ merchantName: string; id?: string | undefined; documentId?: string | undefined; merchantInn?: string; receiptDate?: string; totalAmountKopecks?: number; confidenceScore?: number | undefined; suggestedCategoryId?: string; rawText?: string | undefined; lineItems?: DocumentLineItem[] | undefined; }' is not assignable to parameter of type 'SetStateAction<DocumentExtraction | null>'.
+  Type '{ merchantName: string; id?: string | undefined; documentId?: string | undefined; merchantInn?: string; receiptDate?: string; totalAmountKopecks?: number; confidenceScore?: number | undefined; suggestedCategoryId?: string; rawText?: string | undefined; lineItems?: DocumentLineItem[] | undefined; }' is not assignable to type 'DocumentExtraction'.
+    Types of property 'id' are incompatible.
+      Type 'string | undefined' is not assignable to type 'string'.
+        Type 'undefined' is not assignable to type 'string'.
+src/components/ReceiptScanModal.tsx(609,36): error TS18047: 'extractedData' is possibly 'null'.
+src/components/ReceiptScanModal.tsx(609,36): error TS2345: Argument of type 'number | undefined' is not assignable to parameter of type 'number'.
+  Type 'undefined' is not assignable to type 'number'.
+src/components/ReceiptScanModal.tsx(695,20): error TS18047: 'extractedData' is possibly 'null'.
+src/components/SyncStatusBadge.tsx(3,36): error TS6133: 'CheckCircle2' is declared but its value is never read.
+src/components/SyncStatusBadge.tsx(3,50): error TS6133: 'Clock' is declared but its value is never read.
+src/components/TelegramBotModal.tsx(7,3): error TS6133: 'Paperclip' is declared but its value is never read.
+src/components/TelegramBotModal.tsx(8,3): error TS6133: 'Check' is declared but its value is never read.
+src/components/TelegramBotModal.tsx(10,3): error TS6133: 'Sparkles' is declared but its value is never read.
+src/components/TelegramBotModal.tsx(11,3): error TS6133: 'ShieldCheck' is declared but its value is never read.
+src/components/TelegramBotModal.tsx(12,3): error TS6133: 'Receipt' is declared but its value is never read.
+src/components/TelegramBotModal.tsx(13,3): error TS6133: 'PiggyBank' is declared but its value is never read.
+src/components/TelegramBotModal.tsx(15,1): error TS6133: 'confetti' is declared but its value is never read.
+src/components/TelegramBotModal.tsx(16,30): error TS6133: 'Transaction' is declared but its value is never read.
+src/components/TransactionsTab.tsx(10,10): error TS6133: 'TagIcon' is declared but its value is never read.
+src/components/TransactionsTab.tsx(11,3): error TS6133: 'ArrowUpRight' is declared but its value is never read.
+src/components/TransactionsTab.tsx(14,3): error TS6133: 'AlertCircle' is declared but its value is never read.
+src/components/TransactionsTab.tsx(16,3): error TS6133: 'Calendar' is declared but its value is never read.
+src/components/TransactionsTab.tsx(17,3): error TS6133: 'ChevronLeft' is declared but its value is never read.
+src/components/TransactionsTab.tsx(18,3): error TS6133: 'ChevronRight' is declared but its value is never read.
+src/components/TransactionsTab.tsx(22,3): error TS6133: 'Download' is declared but its value is never read.
+src/components/TransactionsTab.tsx(63,11): error TS6133: 'now' is declared but its value is never read.
+src/context/FamilyContext.tsx(804,9): error TS2322: Type '{ state: FamilyState; dispatch: React.ActionDispatch<[action: FamilyAction]>; forecast: MonthlyForecast; pendingDraftsCount: number; ... 30 more ...; toggleTheme: () => void; }' is not assignable to type 'FamilyContextValue'.
+  The types returned by 'syncInfo.syncNow()' are incompatible between these types.
+    Type 'Promise<{ success: boolean; syncedCount: number; }>' is not assignable to type 'Promise<void>'.
+      Type '{ success: boolean; syncedCount: number; }' is not assignable to type 'void'.
+src/hooks/useBackgroundSync.ts(102,13): error TS7030: Not all code paths return a value.
+src/utils/exportImport.ts(15,1): error TS6133: 'formatMoney' is declared but its value is never read.

@@ -1,0 +1,80 @@
+# ============================================================
+# FinSync — Git Ignore Configuration
+# ============================================================
+
+# ---------- Окружение и Секреты (Environment & Secrets) ----------
+.env
+.env.*
+.env*.local
+!.env.example
+
+# Ключи шифрования, SSL-сертификаты и токены
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
+
+# ---------- Node.js & Frontend Build ----------
+node_modules/
+dist/
+build/
+coverage/
+.npm/
+*.tsbuildinfo
+
+# ---------- Python, FastAPI & Celery (Backend) ----------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+celerybeat-schedule*
+celerybeat.pid
+
+# ---------- Хранилище загрузок и чеков (Storage & OCR) ----------
+# Исключает загруженные чеки, сканы и временные файлы OCR
+storage/
+uploads/
+receipts/
+ocr_temp/
+tessdata/
+
+# ---------- Резервные копии и дампы БД (Backups & Dumps) ----------
+backups/
+*.sql.gz
+*.dump
+db_*.sql
+backup_*.sql
+*.tar.gz
+*.bak
+# Сохраняем эталонную DDL схему базы данных
+!backend/schema.sql
+
+# ---------- Данные контейнеров (Docker Data Volumes) ----------
+# Папки локального монтирования томов PostgreSQL и Redis
+postgres_data/
+redis_data/
+
+# ---------- Логи (Logs) ----------
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- Системные файлы и IDE (OS & Editors) ----------
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
