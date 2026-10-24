@@ -59,4 +59,6 @@ jobs:
           SECRET_KEY: ci-test-secret-key-not-for-production
           ADMIN_TOKEN: ci-test-admin-token
           INTERNAL_API_KEY: ci-test-internal-worker-key
-        run: pytest backend/test_api.py backend/test_bot.py -v
+          TELEGRAM_BOT_TOKEN: "123456:ABCdefGhIJKlmNoPQRsTUVwxyZ_0123456"
+          ALLOWED_TELEGRAM_IDS: "123456789"
+        run: pytest backend/test_api.py backend/test_bot.py backend/test_security.py -v

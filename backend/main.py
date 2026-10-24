@@ -15,6 +15,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import time
 import uuid
 import sys
@@ -126,15 +127,35 @@ except ImportError:
 
 try:
     from backend.auth import (
+        consume_login_code,
         create_access_token,
+        create_login_code,
         decode_access_token,
         verify_token,
     )
+    from backend.security import (
+        InitDataError,
+        admin_telegram_ids,
+        is_telegram_id_allowed,
+        service_key_ok,
+        validate_init_data,
+        validate_runtime_config,
+    )
 except ImportError:
     from auth import (
+        consume_login_code,
         create_access_token,
+        create_login_code,
         decode_access_token,
         verify_token,
+    )
+    from security import (
+        InitDataError,
+        admin_telegram_ids,
+        is_telegram_id_allowed,
+        service_key_ok,
+        validate_init_data,
+        validate_runtime_config,
     )
 
 try:
@@ -239,6 +260,8 @@ async def get_arq_redis_pool():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler to initialize database tables and ARQ pool, and cleanup on shutdown."""
+    # Refuse to start with missing/placeholder secrets or an empty Telegram allowlist.
+    validate_runtime_config()
     await init_db()
     # Eagerly initialize ARQ pool if Redis is accessible
     await get_arq_redis_pool()
@@ -328,11 +351,25 @@ ALLOWED_MIME_TYPES = {
 # ---------------------------------------------------------------------
 
 class TelegramAuthRequest(BaseModel):
-    telegram_id: int
-    first_name: str
+    """
+    Two ways to authenticate (nothing else is accepted):
+      1. Mini App: `init_data` = raw Telegram.WebApp.initData (signature is verified with the bot token).
+      2. Telegram bot container: `telegram_id` + header `X-Internal-Key` (trusted service call).
+    """
+    init_data: Optional[str] = None
+    telegram_id: Optional[int] = None
+    first_name: Optional[str] = None
     last_name: Optional[str] = None
     username: Optional[str] = None
     avatar_url: Optional[str] = None
+
+
+class LoginLinkRequest(BaseModel):
+    telegram_id: int
+
+
+class LoginExchangeRequest(BaseModel):
+    code: str
 
 
 class FamilyJoinRequest(BaseModel):
@@ -439,7 +476,7 @@ async def get_or_create_default_family(session: AsyncSession) -> Family:
         id=to_uuid("fam-01"),
         name="Семья Смирновых",
         base_currency="RUB",
-        invite_code="SMIRNOV-77",
+        invite_code=f"FIN-{secrets.token_hex(4).upper()}",  # random: a public constant would be guessable
         created_by_user_id=default_user.id,
     )
     session.add(family)
@@ -640,16 +677,101 @@ async def healthz():
 # ---------------------------------------------------------------------
 # 1. AUTHENTICATION & TELEGRAM BINDING
 # ---------------------------------------------------------------------
+def _resolve_telegram_identity(
+    payload: TelegramAuthRequest,
+    internal_key: Optional[str],
+) -> Dict[str, Any]:
+    """
+    Establish WHO is calling, then check the allowlist. Never trusts a bare telegram_id
+    from an unauthenticated client.
+    """
+    if payload.init_data:
+        try:
+            tg_user = validate_init_data(payload.init_data, os.getenv("TELEGRAM_BOT_TOKEN", ""))
+        except InitDataError:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Недействительные данные Telegram")
+        identity = {
+            "telegram_id": tg_user["id"],
+            "first_name": tg_user.get("first_name") or "Участник",
+            "last_name": tg_user.get("last_name"),
+            "username": tg_user.get("username"),
+            "avatar_url": tg_user.get("photo_url"),
+        }
+    elif payload.telegram_id is not None and service_key_ok(internal_key):
+        identity = {
+            "telegram_id": payload.telegram_id,
+            "first_name": payload.first_name or "Участник",
+            "last_name": payload.last_name,
+            "username": payload.username,
+            "avatar_url": payload.avatar_url,
+        }
+    else:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Требуется авторизация через Telegram")
+
+    if not is_telegram_id_allowed(identity["telegram_id"]):
+        logger.warning("auth_denied_not_in_allowlist", telegram_id=identity["telegram_id"])
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Доступ запрещён")
+    return identity
+
+
+@app.post("/api/auth/login-link", tags=["Auth"])
+@limiter.limit("20/minute")
+async def create_dashboard_login_link(
+    request: Request,
+    payload: LoginLinkRequest,
+    x_internal_key: Optional[str] = Header(None, alias="X-Internal-Key"),
+):
+    """Bot-only: issue a one-time code that the browser dashboard exchanges for a session."""
+    if not service_key_ok(x_internal_key):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Требуется X-Internal-Key")
+    if not is_telegram_id_allowed(payload.telegram_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Доступ запрещён")
+    return {"code": create_login_code(payload.telegram_id), "expires_in": 300}
+
+
+@app.post("/api/auth/exchange", tags=["Auth"])
+@limiter.limit("20/minute")
+async def exchange_login_code(
+    request: Request,
+    payload: LoginExchangeRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Exchange a one-time login code (from the bot link) for a normal session token."""
+    try:
+        telegram_id = consume_login_code(payload.code)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Ссылка недействительна или устарела")
+    if not is_telegram_id_allowed(telegram_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Доступ запрещён")
+    user = (await session.execute(select(User).where(User.telegram_id == telegram_id))).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Сначала откройте бота командой /start")
+    family = await get_or_create_default_family(session)
+    membership = (await session.execute(
+        select(FamilyMember).where(FamilyMember.family_id == family.id, FamilyMember.user_id == user.id)
+    )).scalar_one_or_none()
+    token = create_access_token(
+        telegram_id=user.telegram_id,
+        user_id=str(user.id),
+        extra_claims={"family_id": str(family.id), "member_id": str(membership.id) if membership else None},
+    )
+    return {"access_token": token, "token_type": "bearer"}
+
+
 @app.post("/api/auth/telegram", tags=["Auth"])
-@limiter.limit("60/minute")
+@limiter.limit("20/minute")
 async def auth_telegram(
     request: Request,
     payload: TelegramAuthRequest,
+    x_internal_key: Optional[str] = Header(None, alias="X-Internal-Key"),
     session: AsyncSession = Depends(get_session),
 ):
     """
-    Authenticate or register user from Telegram WebApp / Bot using PostgreSQL.
+    Authenticate or register user from Telegram Mini App (verified initData) or the bot service.
+    Only IDs from the allowlist (TELEGRAM_ADMIN_CHAT_IDS + ALLOWED_TELEGRAM_IDS) get a token.
     """
+    identity = _resolve_telegram_identity(payload, x_internal_key)
+    payload = TelegramAuthRequest(**identity)
     stmt = select(User).where(User.telegram_id == payload.telegram_id)
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
@@ -1971,47 +2093,8 @@ async def get_expense_forecast(
 # ---------------------------------------------------------------------
 # 7. SYSTEM DATABASE & STORAGE RESET (Protected by Admin Auth)
 # ---------------------------------------------------------------------
-SECRET_KEY = os.getenv("SECRET_KEY", "generate_random_64_character_hex_key_here")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
-TELEGRAM_ADMIN_CHAT_IDS = [
-    cid.strip()
-    for cid in os.getenv("TELEGRAM_ADMIN_CHAT_IDS", "").split(",")
-    if cid.strip()
-]
-
-
-def decode_jwt_token(token: str, secret: str) -> Optional[Dict[str, Any]]:
-    """
-    Decodes and validates a standard HS256 JWT using python standard library.
-    Returns the payload dictionary if signature is valid and not expired, otherwise None.
-    """
-    try:
-        parts = token.split(".")
-        if len(parts) != 3:
-            return None
-        header_b64, payload_b64, signature_b64 = parts
-
-        signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
-        expected_sig = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
-
-        def b64_decode(s: str) -> bytes:
-            rem = len(s) % 4
-            if rem > 0:
-                s += "=" * (4 - rem)
-            return base64.urlsafe_b64decode(s)
-
-        provided_sig = b64_decode(signature_b64)
-        if not hmac.compare_digest(expected_sig, provided_sig):
-            return None
-
-        payload = json.loads(b64_decode(payload_b64).decode("utf-8"))
-        exp = payload.get("exp")
-        if exp and datetime.utcfromtimestamp(exp) < datetime.utcnow():
-            return None
-
-        return payload
-    except Exception:
-        return None
+TELEGRAM_ADMIN_CHAT_IDS = [str(cid) for cid in admin_telegram_ids()]
 
 
 async def verify_admin_token(
@@ -2021,19 +2104,17 @@ async def verify_admin_token(
     """
     Dependency that verifies administrative authorization for critical system actions.
     Accepts:
-      - 'X-Admin-Token' header matching ADMIN_TOKEN or SECRET_KEY from env.
-      - 'Authorization: Bearer <token>' matching ADMIN_TOKEN, SECRET_KEY, admin telegram IDs,
+      - 'X-Admin-Token' header matching ADMIN_TOKEN from env (if set).
+      - 'Authorization: Bearer <token>' matching ADMIN_TOKEN, a JWT of an admin telegram ID,
         or a valid HS256 JWT containing admin/owner role.
     """
     # 1. Verify X-Admin-Token header
     if x_admin_token:
         if ADMIN_TOKEN and hmac.compare_digest(x_admin_token, ADMIN_TOKEN):
             return {"sub": "admin", "auth_method": "x_admin_token"}
-        if SECRET_KEY and hmac.compare_digest(x_admin_token, SECRET_KEY):
-            return {"sub": "admin", "auth_method": "x_admin_secret"}
         # Backdoor удалён (audit P0.3): ранее принимались захардкоженные
         # "admin"/"finsync-admin-secret"/"superadmin" — любой, кто читал
-        # исходник, мог сбросить БД. Теперь — только env ADMIN_TOKEN/SECRET_KEY.
+        # исходник, мог сбросить БД. Теперь — только env ADMIN_TOKEN (или JWT админа).
 
     # 2. Verify Authorization Bearer header (JWT or static admin key)
     bearer_token = None
@@ -2043,14 +2124,15 @@ async def verify_admin_token(
     if bearer_token:
         if ADMIN_TOKEN and hmac.compare_digest(bearer_token, ADMIN_TOKEN):
             return {"sub": "admin", "auth_method": "bearer_admin_token"}
-        if SECRET_KEY and hmac.compare_digest(bearer_token, SECRET_KEY):
-            return {"sub": "admin", "auth_method": "bearer_secret"}
         # Backdoor удалён (audit P0.3): Bearer-вариант той же уязвимости.
 
         try:
             payload = decode_access_token(bearer_token)
         except Exception:
             payload = None
+
+        if payload and payload.get("typ") == "login":
+            payload = None  # one-time login codes never grant admin access
 
         if payload:
             role = payload.get("role")

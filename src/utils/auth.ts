@@ -1,6 +1,11 @@
 /**
- * JWT Authentication utility for Family Budget frontend.
- * Interacts with /api/auth/telegram to acquire signed Bearer JWT tokens.
+ * JWT authentication for the FinSync frontend.
+ *
+ * Two ways to get a session token (no anonymous or hard-coded logins):
+ *  1. Inside Telegram (Mini App): send the signed `Telegram.WebApp.initData`;
+ *     the backend verifies the signature with the bot token and checks the allowlist.
+ *  2. In a browser: open the link from the bot's /dashboard command. It carries a
+ *     one-time `?login=<code>` that is exchanged for a session token and removed from the URL.
  */
 
 let cachedToken: string | null = null;
@@ -8,10 +13,51 @@ let pendingAuthPromise: Promise<string> | null = null;
 
 const TOKEN_STORAGE_KEY = 'family_budget_jwt_token';
 
+async function requestToken(url: string, body: Record<string, string>): Promise<string> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    return '';
+  }
+  const data = await res.json();
+  return typeof data.access_token === 'string' ? data.access_token : '';
+}
+
+function takeLoginCodeFromUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  const url = new URL(window.location.href);
+  const code = url.searchParams.get('login');
+  if (!code) return null;
+  // Remove the one-time code from the address bar and browser history right away.
+  url.searchParams.delete('login');
+  window.history.replaceState({}, '', url.pathname + url.search + url.hash);
+  return code;
+}
+
+function storeToken(token: string): void {
+  cachedToken = token;
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(TOKEN_STORAGE_KEY, token);
+  }
+}
+
 /**
- * Retrieve the active JWT token, restoring from localStorage or acquiring via /api/auth/telegram.
+ * Retrieve the active JWT. Returns '' when the user is not authenticated.
  */
 export async function getAuthToken(): Promise<string> {
+  const loginCode = takeLoginCodeFromUrl();
+  if (loginCode) {
+    clearAuthToken();
+    const token = await requestToken('/api/auth/exchange', { code: loginCode }).catch(() => '');
+    if (token) {
+      storeToken(token);
+      return token;
+    }
+  }
+
   if (cachedToken) {
     return cachedToken;
   }
@@ -26,37 +72,24 @@ export async function getAuthToken(): Promise<string> {
     return pendingAuthPromise;
   }
 
+  const initData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : '';
+  if (!initData) {
+    return '';
+  }
+
   pendingAuthPromise = (async () => {
     try {
-      const res = await fetch('/api/auth/telegram', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          telegram_id: 123456789,
-          first_name: 'Пользователь Web',
-          username: 'family_web_user',
-        }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        if (data.access_token) {
-          cachedToken = data.access_token;
-          if (typeof window !== 'undefined') {
-            localStorage.setItem(TOKEN_STORAGE_KEY, data.access_token);
-          }
-          return data.access_token;
-        }
+      const token = await requestToken('/api/auth/telegram', { init_data: initData });
+      if (token) {
+        storeToken(token);
       }
+      return token;
     } catch (err) {
-      console.warn('[Auth] Failed to obtain JWT token from backend:', err);
+      console.warn('[Auth] Telegram authentication failed:', err);
+      return '';
     } finally {
       pendingAuthPromise = null;
     }
-
-    return '';
   })();
 
   return pendingAuthPromise;
@@ -73,7 +106,8 @@ export function clearAuthToken(): void {
 }
 
 /**
- * Enhanced fetch wrapper with automatic JWT Bearer token injection and retry on 401.
+ * Fetch wrapper with automatic JWT Bearer injection. On 401 inside Telegram it re-authenticates
+ * once with fresh initData; in a browser the user must open a new link from the bot.
  */
 export async function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const token = await getAuthToken();
@@ -88,7 +122,6 @@ export async function authFetch(input: RequestInfo | URL, init?: RequestInit): P
     headers,
   });
 
-  // If token expired or invalid, refresh and retry once
   if (response.status === 401) {
     clearAuthToken();
     const freshToken = await getAuthToken();

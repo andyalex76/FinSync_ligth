@@ -18,7 +18,7 @@ import os
 import re
 from typing import Any, Dict, Optional, Tuple
 
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -26,10 +26,15 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, MenuButton
 
 try:
     from backend.bot_client import BotAPIClient
+    from backend.security import is_telegram_id_allowed
 except ImportError:
     from bot_client import BotAPIClient
+    from security import is_telegram_id_allowed
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+# Real values come only from the server-side .env (never from the repository).
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+if not TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN is not set (fill it in the server-side .env)")
 DASHBOARD_URL = os.getenv("APP_URL", "http://localhost:3000")
 BACKEND_API_URL = os.getenv("BACKEND_API_URL", "http://backend:8000")
 MINI_APP_URL = f"{DASHBOARD_URL}?source=telegram"
@@ -40,6 +45,20 @@ logger = logging.getLogger("family_budget.bot")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 api_client = BotAPIClient(base_url=BACKEND_API_URL)
+
+
+class AllowlistMiddleware(BaseMiddleware):
+    """Silently ignore every update from Telegram IDs that are not on the allowlist."""
+
+    async def __call__(self, handler, event, data):
+        user = data.get("event_from_user")
+        if user is None or not is_telegram_id_allowed(user.id):
+            logger.warning("Ignoring update from non-allowlisted Telegram ID %s", user.id if user else None)
+            return None
+        return await handler(event, data)
+
+
+dp.update.outer_middleware(AllowlistMiddleware())
 
 
 def escape_markdown_v2(text: Any) -> str:
@@ -72,6 +91,16 @@ def get_draft_keyboard(draft_id: str) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+async def dashboard_link(telegram_id: int) -> str:
+    """Dashboard URL with a one-time login code (valid 5 minutes) for browser access."""
+    try:
+        code = await api_client.get_login_code(telegram_id)
+        return f"{DASHBOARD_URL}?login={code}"
+    except Exception as exc:
+        logger.warning("Could not create dashboard login link (%s)", type(exc).__name__)
+        return DASHBOARD_URL
 
 
 async def get_or_create_user_auth(user: types.User, state: FSMContext) -> Tuple[str, Optional[str], Optional[str]]:
@@ -108,10 +137,10 @@ async def get_or_create_user_auth(user: types.User, state: FSMContext) -> Tuple[
         )
         return token, member_id, family_id
     except Exception as exc:
-        logger.warning("Auth call failed for tg_user %s (%s). Using fallback JWT.", user.id, exc)
-        fallback_token = api_client.create_fallback_token(telegram_id=user.id)
-        await state.update_data(access_token=fallback_token)
-        return fallback_token, None, None
+        # The bot cannot sign tokens itself. Without a valid token API calls fail with 401 and the
+        # handlers show an error to the user.
+        logger.warning("Auth call failed for tg_user %s (%s)", user.id, type(exc).__name__)
+        return "", None, None
 
 
 @dp.message(CommandStart())
@@ -247,6 +276,7 @@ async def cmd_dashboard(message: types.Message, state: FSMContext):
         return
 
     token, _, _ = await get_or_create_user_auth(message.from_user, state)
+    link = await dashboard_link(message.from_user.id)
 
     try:
         summary = await api_client.get_dashboard_summary(token=token)
@@ -285,7 +315,7 @@ async def cmd_dashboard(message: types.Message, state: FSMContext):
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="📱 Открыть Web Дашборд", url=DASHBOARD_URL)]
+                    [InlineKeyboardButton(text="📱 Открыть Web Дашборд", url=link)]
                 ]
             ),
         )
@@ -298,7 +328,7 @@ async def cmd_dashboard(message: types.Message, state: FSMContext):
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="📱 Открыть Web Дашборд", url=DASHBOARD_URL)]
+                    [InlineKeyboardButton(text="📱 Открыть Web Дашборд", url=link)]
                 ]
             ),
         )
@@ -560,10 +590,6 @@ async def handle_quick_entry(message: types.Message, state: FSMContext):
 
 
 async def main():
-    if not TOKEN or TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
-        logger.error("❌ CRITICAL: TELEGRAM_BOT_TOKEN is not set or default in .env!")
-        return
-
     try:
         bot_user = await bot.get_me()
         logger.info(f"✅ FinSync Telegram bot connected: @{bot_user.username} (ID: {bot_user.id})")

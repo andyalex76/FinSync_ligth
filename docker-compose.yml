@@ -16,7 +16,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-family_budget}
       POSTGRES_USER: ${POSTGRES_USER:-budget_admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vps_secure_password_123}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./backend/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
@@ -36,11 +36,11 @@ services:
     image: redis:7-alpine
     container_name: family_budget_redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-redis_pass_123}"]
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}"]
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_pass_123}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -56,14 +56,16 @@ services:
     container_name: family_budget_api
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-budget_admin}:${POSTGRES_PASSWORD:-vps_secure_password_123}@postgres:5432/${POSTGRES_DB:-family_budget}
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_pass_123}@redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-budget_admin}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-family_budget}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/0
       UPLOAD_DIR: /app/storage/uploads
       BASE_CURRENCY: ${BASE_CURRENCY:-RUB}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN must be set in .env}
       TELEGRAM_ADMIN_CHAT_IDS: ${TELEGRAM_ADMIN_CHAT_IDS:-}
+      ALLOWED_TELEGRAM_IDS: ${ALLOWED_TELEGRAM_IDS:-}
     volumes:
       - uploads_data:/app/storage/uploads
     depends_on:
@@ -97,7 +99,7 @@ services:
     container_name: family_budget_ocr_worker
     restart: unless-stopped
     environment:
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_pass_123}@redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/0
       BACKEND_API_URL: http://backend:8000
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       UPLOAD_DIR: /app/storage/uploads
@@ -134,10 +136,12 @@ services:
     container_name: family_budget_bot
     restart: unless-stopped
     environment:
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN must be set in .env}
       BACKEND_API_URL: http://backend:8000
       APP_URL: ${APP_URL:-https://budget.your-domain.ru}
-      SECRET_KEY: ${SECRET_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      TELEGRAM_ADMIN_CHAT_IDS: ${TELEGRAM_ADMIN_CHAT_IDS:-}
+      ALLOWED_TELEGRAM_IDS: ${ALLOWED_TELEGRAM_IDS:-}
     depends_on:
       backend:
         condition: service_healthy

@@ -189,7 +189,7 @@ async def test_transaction_creation_validation():
 
     transport = ASGITransport(app=app)
     token = create_access_token(
-        telegram_id=123,
+        telegram_id=123456789,  # present in ALLOWED_TELEGRAM_IDS (see conftest.py)
         user_id="usr-1",
         role="member",
         extra_claims={"family_id": "fam-1", "member_id": "mem-1"},
