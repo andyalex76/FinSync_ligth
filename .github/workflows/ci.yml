@@ -40,6 +40,21 @@ jobs:
     name: Backend Lint & Test (Python 3.12)
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: budget_admin
+          POSTGRES_PASSWORD: ci_only_password
+          POSTGRES_DB: family_budget
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U budget_admin -d family_budget"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -61,4 +76,5 @@ jobs:
           INTERNAL_API_KEY: ci-test-internal-worker-key
           TELEGRAM_BOT_TOKEN: "123456:ABCdefGhIJKlmNoPQRsTUVwxyZ_0123456"
           ALLOWED_TELEGRAM_IDS: "123456789"
-        run: pytest backend/test_api.py backend/test_bot.py backend/test_security.py -v
+          DATABASE_URL: postgresql+asyncpg://budget_admin:ci_only_password@localhost:5432/family_budget
+        run: pytest backend/test_api.py backend/test_bot.py backend/test_security.py backend/test_models.py backend/test_e2e_auth.py -v
