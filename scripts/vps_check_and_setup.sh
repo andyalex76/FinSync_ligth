@@ -219,12 +219,22 @@ if [ ! -f "$ENV_FILE" ] || [[ "$REGEN_ENV" =~ ^[YyДд]$ ]]; then
     echo -e "  2. Отправьте /newbot, укажите название и username (например: MyFamilyBudget_bot)"
     echo -e "  3. Скопируйте полученный HTTP API токен."
     read -p "  2. Вставьте TELEGRAM_BOT_TOKEN: " USER_BOT_TOKEN
-    USER_BOT_TOKEN=${USER_BOT_TOKEN:-"YOUR_TELEGRAM_BOT_TOKEN_HERE"}
+    if [ -z "$USER_BOT_TOKEN" ]; then
+        echo -e "  ${RED}TELEGRAM_BOT_TOKEN обязателен: без него бот и проверка Mini App не работают. Запустите скрипт снова.${NC}"
+        exit 1
+    fi
 
     echo -e "\n  ${YELLOW}Telegram Admin Chat ID:${NC}"
     echo -e "  Узнайте ваш ID через бота @userinfobot или @getmyid_bot в Telegram."
     read -p "  3. Вставьте ваш Telegram ID (цифры): " USER_ADMIN_ID
-    USER_ADMIN_ID=${USER_ADMIN_ID:-"123456789"}
+    if ! [[ "$USER_ADMIN_ID" =~ ^[0-9]+$ ]]; then
+        echo -e "  ${RED}Нужен числовой Telegram ID (иначе доступ к API будет закрыт для всех). Запустите скрипт снова.${NC}"
+        exit 1
+    fi
+
+    echo -e "\n  ${YELLOW}Остальные участники семьи (необязательно):${NC}"
+    echo -e "  Telegram ID через запятую. Доступ получают ТОЛЬКО перечисленные ID."
+    read -p "  4. ALLOWED_TELEGRAM_IDS: " USER_ALLOWED_IDS
 
     # Запись в .env
     cat <<EOF > "$ENV_FILE"
@@ -259,6 +269,7 @@ REDIS_PORT=6379
 # ---------- Telegram-бот (aiogram 3) ----------
 TELEGRAM_BOT_TOKEN=${USER_BOT_TOKEN}
 TELEGRAM_ADMIN_CHAT_IDS=${USER_ADMIN_ID}
+ALLOWED_TELEGRAM_IDS=${USER_ALLOWED_IDS}
 TELEGRAM_BOT_MODE=long_polling
 
 # ---------- JWT / Аутентификация ----------

@@ -74,6 +74,10 @@ export const TelegramMiniAppView: React.FC<TelegramMiniAppViewProps> = ({
 
     try {
       handleAddTransaction({
+        id: `tx-${Date.now()}`,
+        familyId: state.family.id,
+        status: 'confirmed',
+        createdAt: new Date().toISOString(),
         type: txType,
         amountKopecks: rublesToKopecks(rubles),
         currency: state.family.currency,

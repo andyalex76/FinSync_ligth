@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { Category, FamilyMember, Transaction, DocumentLineItem, DocumentExtraction } from '../types';
-import { extractDataFromReceiptText, SAMPLE_RECEIPTS } from '../utils/ocrExtractor';
+import { extractDataFromReceiptText } from '../utils/ocrExtractor';
 import { formatMoney } from '../utils/money';
 import { CategoryIconSelector } from './CategoryIcon';
 import { StorageService } from '../utils/storage';
@@ -58,7 +58,6 @@ export const ReceiptScanModal: React.FC<ReceiptScanModalProps> = ({
   const { state } = useFamily();
   const effectiveFamilyId = familyId || state.family.id;
   const [pipelineStep, setPipelineStep] = useState<'idle' | 'parsing' | 'review'>('idle');
-  const [selectedSampleIndex, setSelectedSampleIndex] = useState<number>(0);
   const [pastedText, setPastedText] = useState<string>('');
   const [fileNotice, setFileNotice] = useState<string | null>(null);
   const [ocrError, setOcrError] = useState<string | null>(null);
@@ -218,13 +217,6 @@ export const ReceiptScanModal: React.FC<ReceiptScanModalProps> = ({
     setTimeout(() => {
       finalizeExtraction(textToProcess);
     }, 350);
-  };
-
-  const handleStartSample = (index: number) => {
-    setSelectedSampleIndex(index);
-    const sample = SAMPLE_RECEIPTS[index];
-    setPastedText(sample.rawText);
-    handleRunParser(sample.rawText);
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -461,38 +453,6 @@ export const ReceiptScanModal: React.FC<ReceiptScanModalProps> = ({
                       className="hidden"
                     />
                   </label>
-                </div>
-              </div>
-
-              <div className="pt-1">
-                <p className="text-[10px] font-bold uppercase tracking-wider dark:text-slate-400 text-slate-500 mb-2">
-                  Или протестируйте готовый образец чека:
-                </p>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3">
-                  {SAMPLE_RECEIPTS.map((sample, idx) => (
-                    <button
-                      key={sample.name}
-                      onClick={() => handleStartSample(idx)}
-                      className={`p-3 text-left rounded-xl border transition-all flex items-center justify-between sm:flex-col sm:items-start shadow-xs active:scale-98 ${
-                        selectedSampleIndex === idx
-                          ? 'border-amber-500 bg-amber-50/50 dark:bg-amber-950/20'
-                          : 'dark:border-slate-800 border-slate-200 dark:hover:border-amber-500 hover:border-amber-400 dark:bg-slate-900/60 bg-slate-50 dark:hover:bg-amber-950/20 hover:bg-amber-50'
-                      }`}
-                    >
-                      <div>
-                        <p className="font-semibold text-xs dark:text-white text-slate-900 line-clamp-1">
-                          {sample.merchant}
-                        </p>
-                        <p className="text-[10px] dark:text-slate-400 text-slate-500 mt-0.5">
-                          {sample.name}
-                        </p>
-                      </div>
-                      <p className="font-mono font-bold text-xs text-emerald-600 dark:text-emerald-400 sm:mt-2">
-                        {formatMoney(sample.amountKopecks)}
-                      </p>
-                    </button>
-                  ))}
                 </div>
               </div>
             </div>

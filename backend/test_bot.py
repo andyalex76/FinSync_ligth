@@ -95,14 +95,11 @@ async def test_bot_client_auth_headers():
     await client.close()
 
 
-@pytest.mark.asyncio
-async def test_bot_client_fallback_token():
-    """Verify that fallback token can be generated even without server response."""
+def test_bot_client_cannot_forge_tokens():
+    """The bot holds no SECRET_KEY and must not be able to sign JWTs itself."""
     client = BotAPIClient()
-    token = client.create_fallback_token(telegram_id=999888777, member_id="mem-123")
-    assert isinstance(token, str)
-    assert len(token) > 20
-    await client.close()
+    assert not hasattr(client, "create_fallback_token")
+    assert not hasattr(client, "secret_key")
 
 
 @pytest.mark.asyncio

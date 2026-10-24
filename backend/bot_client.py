@@ -13,9 +13,11 @@ logger = logging.getLogger("family_budget.bot_client")
 
 
 class BotAPIClient:
-    def __init__(self, base_url: Optional[str] = None, secret_key: Optional[str] = None):
+    def __init__(self, base_url: Optional[str] = None, internal_key: Optional[str] = None):
         self.base_url = (base_url or os.getenv("BACKEND_API_URL", "http://backend:8000")).rstrip("/")
-        self.secret_key = secret_key or os.getenv("SECRET_KEY", "finsync-production-secret-key-32chars-min-987654321")
+        # Shared secret between the bot container and the API (set in the server-side .env only).
+        # The bot never holds SECRET_KEY and never signs JWTs itself.
+        self.internal_key = internal_key or os.getenv("INTERNAL_API_KEY", "")
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def get_session(self) -> aiohttp.ClientSession:
@@ -35,40 +37,6 @@ class BotAPIClient:
         if token:
             headers["Authorization"] = f"Bearer {token}"
         return headers
-
-    def create_fallback_token(
-        self,
-        telegram_id: int,
-        user_id: Optional[str] = None,
-        member_id: Optional[str] = None,
-        family_id: Optional[str] = None,
-    ) -> str:
-        """
-        Create a valid HS256 JWT using shared SECRET_KEY as fallback
-        if the backend is unreachable or during emergency offline mode.
-        """
-        try:
-            from backend.auth import create_access_token
-        except ImportError:
-            try:
-                from auth import create_access_token
-            except ImportError:
-                create_access_token = None
-
-        if create_access_token:
-            extra = {}
-            if family_id:
-                extra["family_id"] = family_id
-            if member_id:
-                extra["member_id"] = member_id
-            return create_access_token(
-                telegram_id=telegram_id,
-                user_id=user_id,
-                extra_claims=extra,
-            )
-
-        # Basic fallback without auth module
-        return ""
 
     async def auth_telegram(
         self,
@@ -91,31 +59,27 @@ class BotAPIClient:
             "avatar_url": avatar_url,
         }
         url = f"{self.base_url}/api/auth/telegram"
-        try:
-            async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    logger.info("Successfully authenticated Telegram user %s via API", telegram_id)
-                    return data
-                error_text = await resp.text()
-                logger.error("API auth_telegram failed (%s): %s", resp.status, error_text)
-                raise RuntimeError(f"Auth failed with HTTP {resp.status}: {error_text}")
-        except aiohttp.ClientError as exc:
-            logger.warning("Could not reach backend auth at %s (%s). Generating fallback token.", url, exc)
-            fallback_token = self.create_fallback_token(telegram_id=telegram_id)
-            return {
-                "access_token": fallback_token,
-                "token_type": "bearer",
-                "user": {
-                    "id": f"usr-tg-{telegram_id}",
-                    "telegram_id": telegram_id,
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    "username": username,
-                    "family_id": None,
-                    "member_id": None,
-                },
-            }
+        headers = {"Content-Type": "application/json", "X-Internal-Key": self.internal_key}
+        async with session.post(url, json=payload, headers=headers) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                logger.info("Authenticated Telegram user %s via API", telegram_id)
+                return data
+            if resp.status == 403:
+                raise PermissionError("Telegram user is not in the allowlist")
+            error_text = await resp.text()
+            logger.error("API auth_telegram failed (%s): %s", resp.status, error_text)
+            raise RuntimeError(f"Auth failed with HTTP {resp.status}")
+
+    async def get_login_code(self, telegram_id: int) -> str:
+        """Ask the API for a one-time code to open the browser dashboard."""
+        session = await self.get_session()
+        url = f"{self.base_url}/api/auth/login-link"
+        headers = {"Content-Type": "application/json", "X-Internal-Key": self.internal_key}
+        async with session.post(url, json={"telegram_id": telegram_id}, headers=headers) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"Login link failed with HTTP {resp.status}")
+            return (await resp.json())["code"]
 
     async def join_family(
         self,
