@@ -344,7 +344,7 @@ export const BackupExportModal: React.FC<BackupExportModalProps> = ({
                   <button
                     type="button"
                     disabled={isResetting}
-                    onClick={() => handleExecuteReset(confirmMode)}
+                    onClick={() => handleExecuteReset()}
                     className="flex-1 py-2 px-3 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs transition active:scale-98 shadow-xs flex items-center justify-center gap-1.5 disabled:opacity-50"
                   >
                     {isResetting ? (
