@@ -84,7 +84,7 @@ class Family(Base):
     budgets: Mapped[List["Budget"]] = relationship(back_populates="family", cascade="all, delete-orphan")
     tags: Mapped[List["Tag"]] = relationship(back_populates="family", cascade="all, delete-orphan")
     recurring_rules: Mapped[List["RecurringRule"]] = relationship(back_populates="family", cascade="all, delete-orphan")
-    funds: Mapped[List["Fund"]] = relationship(back_populates="family", cascade="all, delete-orphan")
+    funds: Mapped[List["SavingsGoal"]] = relationship(back_populates="family", cascade="all, delete-orphan")
 
 
 class FamilyMember(Base):

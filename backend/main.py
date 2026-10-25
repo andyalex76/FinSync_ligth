@@ -462,7 +462,7 @@ async def get_or_create_default_family(session: AsyncSession) -> Family:
     # Seed Default User
     default_user = User(
         id=to_uuid("usr-01"),
-        telegram_id=123456789,
+        telegram_id=-1,  # demo user: must never collide with a real Telegram ID
         username="alex_smirnov",
         first_name="Алексей",
         last_name="Смирнов",
@@ -530,6 +530,7 @@ async def get_or_create_default_family(session: AsyncSession) -> Family:
     ]
 
     current_month = date.today().strftime("%Y-%m")
+    pending_budgets = []
     for cat_slug, name, icon, color, is_inc, sort_order, limit_kopecks in default_categories_data:
         cat_id = to_uuid(cat_slug)
         category = Category(
@@ -550,7 +551,12 @@ async def get_or_create_default_family(session: AsyncSession) -> Family:
                 limit_kopecks=limit_kopecks,
                 notify_threshold_percent=80,
             )
-            session.add(budget)
+            pending_budgets.append(budget)
+
+    # Categories must be INSERTed before budgets: there is no ORM relationship between them,
+    # so SQLAlchemy would not order the two inserts and the FK check could fail.
+    await session.flush()
+    session.add_all(pending_budgets)
 
     # Seed Default Tags
     for tag_name in ["супермаркет", "кафе", "аптека", "жкх", "бензин"]:
