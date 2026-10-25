@@ -196,36 +196,29 @@ async def cmd_start(message: types.Message, state: FSMContext):
             await state.set_state(BotStates.waiting_for_invite_code)
             return
 
-    # No code in /start
-    data = await state.get_data()
-    family_name = data.get("family_name")
-    if member_id and family_name:
-        safe_family = escape_markdown_v2(family_name)
+    # No invite code in /start. Access is controlled by the Telegram ID allowlist, so an authenticated
+    # user (the API created or found their family membership) is simply greeted.
+    if member_id:
+        await state.set_state(None)
         await message.answer(
             f"👋 Привет, {user_name}\\!\n\n"
-            f"Вы авторизованы в семье *{safe_family}*\\.\n\n"
+            f"Вы авторизованы в семейном бюджете\\.\n\n"
             f"💡 *Возможности бота:*\n"
             f"• Введите `650 Обед` для быстрой записи расхода в базу\n"
-            f"• Пришлите фото чека для автоматического OCR\\-распознавания\n"
             f"• Отправьте /dashboard для проверки баланса и прогноза",
             parse_mode="MarkdownV2",
         )
     else:
+        # Auth failed (backend unavailable) or the family is full. Do not wait for an invite code.
+        await state.set_state(None)
         await message.answer(
-            f"👋 Привет, {user_name}\\!\n\n"
-            f"Это семейный бот учета финансов FinSync \\(до 5 участников\\)\\.\n"
-            f"Введите код приглашения вашей семьи \\(например: `SMIRNOV-77`\\) или перейдите в веб\\-дашборд:",
+            "⚠️ Не удалось подключиться к семейному бюджету\\. "
+            "Попробуйте позже или сообщите администратору\\.",
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="📱 Открыть Web Дашборд", url=DASHBOARD_URL)]
-                ]
-            ),
         )
-        await state.set_state(BotStates.waiting_for_invite_code)
 
 
-@dp.message(BotStates.waiting_for_invite_code)
+@dp.message(BotStates.waiting_for_invite_code, F.text, ~F.text.startswith("/"))
 async def process_invite_code(message: types.Message, state: FSMContext):
     """Process user-submitted invite code via backend API."""
     if not message.from_user or not message.text:

@@ -158,3 +158,63 @@ async def test_bot_client_create_transaction():
         assert res["amount_kopecks"] == 54000
 
     await client.close()
+
+
+# ---------------------------------------------------------------------------
+# /start must not trap an authenticated user in the invite-code dialog
+# ---------------------------------------------------------------------------
+def _fake_message(text="/start"):
+    message = MagicMock()
+    message.text = text
+    message.from_user = MagicMock(id=235794506, first_name="Андрей", last_name=None, username="andy")
+    message.answer = AsyncMock()
+    return message
+
+
+def _fsm_context():
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    return FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=1, user_id=1))
+
+
+@pytest.mark.asyncio
+async def test_start_greets_authenticated_user_without_invite_code():
+    from backend import bot as bot_module
+
+    state = _fsm_context()
+    message = _fake_message("/start")
+    auth_reply = {"access_token": "jwt", "user": {"member_id": "mem-1", "family_id": "fam-1"}}
+
+    with patch.object(bot_module.api_client, "auth_telegram", AsyncMock(return_value=auth_reply)):
+        await bot_module.cmd_start(message, state)
+
+    sent = message.answer.call_args.args[0]
+    assert "код приглашения" not in sent.lower()
+    assert await state.get_state() is None
+
+
+@pytest.mark.asyncio
+async def test_start_without_membership_does_not_wait_for_invite_code():
+    from backend import bot as bot_module
+
+    state = _fsm_context()
+    message = _fake_message("/start")
+
+    with patch.object(bot_module.api_client, "auth_telegram", AsyncMock(side_effect=RuntimeError("down"))):
+        await bot_module.cmd_start(message, state)
+
+    assert "код приглашения" not in message.answer.call_args.args[0].lower()
+    assert await state.get_state() is None
+
+
+def test_invite_code_handler_ignores_commands():
+    """A leftover invite-code state must never swallow /dashboard, /help and other commands."""
+    from types import SimpleNamespace
+
+    from aiogram import F
+
+    only_plain_text = ~F.text.startswith("/")
+    assert only_plain_text.resolve(SimpleNamespace(text="SMIRNOV-77")) is True
+    assert only_plain_text.resolve(SimpleNamespace(text="/dashboard")) is False
