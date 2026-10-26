@@ -2,54 +2,15 @@
 Authentication and JWT token management for Family Budget backend.
 Provides cryptographic token generation and verification using PyJWT (HS256).
 """
-import base64
-import hashlib
-import hmac
-import json
 import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Union
 
-try:
-    from fastapi import Depends, HTTPException, Header, status
-    from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-except ImportError:
-    class HTTPException(Exception):
-        def __init__(self, status_code: int, detail: str = ""):
-            self.status_code = status_code
-            self.detail = detail
-            super().__init__(detail)
-
-    class status:
-        HTTP_401_UNAUTHORIZED = 401
-        HTTP_403_FORBIDDEN = 403
-
-    def Depends(fn=None):
-        return fn
-
-    def Header(*args, **kwargs):
-        return args[0] if args else None
-
-    class HTTPAuthorizationCredentials:
-        def __init__(self, scheme: str = "Bearer", credentials: str = ""):
-            self.scheme = scheme
-            self.credentials = credentials
-
-    class HTTPBearer:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __call__(self, request=None):
-            return None
-
-try:
-    import jwt
-    HAS_PYJWT = True
-except ImportError:
-    jwt = None
-    HAS_PYJWT = False
+import jwt
+from fastapi import Depends, Header, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 try:
     from backend.security import is_telegram_id_allowed
@@ -58,7 +19,7 @@ except ImportError:
 
 logger = logging.getLogger("family_budget.auth")
 
-ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+ALGORITHM = "HS256"  # fixed on purpose: the algorithm must never come from configuration
 ACCESS_TOKEN_EXPIRE_DAYS = int(os.getenv("ACCESS_TOKEN_EXPIRE_DAYS", "30"))
 
 http_bearer = HTTPBearer(auto_error=False)
@@ -72,56 +33,6 @@ def get_secret_key() -> str:
     if not secret:
         raise RuntimeError("SECRET_KEY is not configured")
     return secret
-
-
-def _base64url_encode(data: bytes) -> str:
-    """Encode bytes to base64url without padding."""
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("utf-8")
-
-
-def _base64url_decode(data: str) -> bytes:
-    """Decode base64url string with restored padding."""
-    padding = len(data) % 4
-    if padding > 0:
-        data += "=" * (4 - padding)
-    return base64.urlsafe_b64decode(data.encode("utf-8"))
-
-
-def _encode_jwt_manual(payload: Dict[str, Any], secret: str) -> str:
-    """Standard RFC 7519 HMAC-SHA256 JWT encoding fallback."""
-    header = {"alg": "HS256", "typ": "JWT"}
-    header_b64 = _base64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
-    payload_b64 = _base64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
-    sig = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
-    sig_b64 = _base64url_encode(sig)
-    return f"{header_b64}.{payload_b64}.{sig_b64}"
-
-
-def _decode_jwt_manual(token: str, secret: str) -> Dict[str, Any]:
-    """Standard RFC 7519 HMAC-SHA256 JWT decoding fallback."""
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise ValueError("Invalid JWT format: expected 3 segments separated by dots")
-    header_b64, payload_b64, sig_b64 = parts
-    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
-    expected_sig = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
-    try:
-        actual_sig = _base64url_decode(sig_b64)
-    except Exception as exc:
-        raise ValueError(f"Invalid signature encoding: {exc}")
-    if not hmac.compare_digest(expected_sig, actual_sig):
-        raise ValueError("JWT signature verification failed")
-    try:
-        payload = json.loads(_base64url_decode(payload_b64).decode("utf-8"))
-    except Exception as exc:
-        raise ValueError(f"Invalid JWT payload JSON: {exc}")
-    exp = payload.get("exp")
-    if exp:
-        now_ts = int(datetime.now(timezone.utc).timestamp())
-        if now_ts > exp:
-            raise ValueError("JWT token has expired")
-    return payload
 
 
 def create_access_token(
@@ -152,19 +63,15 @@ def create_access_token(
     if extra_claims:
         payload.update(extra_claims)
 
-    if HAS_PYJWT and jwt is not None:
-        return jwt.encode(payload, get_secret_key(), algorithm=ALGORITHM)
-    return _encode_jwt_manual(payload, get_secret_key())
+    return jwt.encode(payload, get_secret_key(), algorithm=ALGORITHM)
 
 
 def decode_access_token(token: str) -> Dict[str, Any]:
     """
     Decode and cryptographically verify a signed JWT token using SECRET_KEY.
-    Raises ValueError or jwt exceptions if invalid or expired.
+    Raises jwt exceptions if invalid or expired.
     """
-    if HAS_PYJWT and jwt is not None:
-        return jwt.decode(token, get_secret_key(), algorithms=[ALGORITHM])
-    return _decode_jwt_manual(token, get_secret_key())
+    return jwt.decode(token, get_secret_key(), algorithms=[ALGORITHM])
 
 
 async def verify_token(

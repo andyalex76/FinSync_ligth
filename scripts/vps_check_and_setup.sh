@@ -54,7 +54,7 @@ echo -e "  Файл подкачки (Swap): ${GREEN}${SWAP_TOTAL_MB} MB${NC}"
 
 if [ "$RAM_TOTAL_MB" -lt 1500 ] && [ "$SWAP_TOTAL_MB" -lt 1000 ]; then
     echo -e "  ${YELLOW}⚠️ ПРЕДУПРЕЖДЕНИЕ: На сервере менее 1.5 GB RAM и отсутствует Swap!${NC}"
-    echo -e "     Сборка OCR (Tesseract) или компиляция Vite может вызвать OOM (Out Of Memory)."
+    echo -e "     Сборка образов или компиляция Vite может вызвать OOM (Out Of Memory)."
     echo -e "     Для добавления 2 GB Swap выполните:"
     echo -e "     ${CYAN}sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile${NC}"
     echo -e "     ${CYAN}echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab${NC}"
@@ -157,9 +157,8 @@ check_port 443 "HTTPS веб-сервер"
 check_port 3000 "FinSync Dashboard (PWA)"
 check_port 8000 "FinSync FastAPI Backend"
 check_port 5432 "PostgreSQL (Хост/Контейнер)"
-check_port 6379 "Redis (Хост/Контейнер)"
 
-echo -e "  ${BLUE}Примечание: Внутренние порты PostgreSQL (5432) и Redis (6379) в docker-compose.yml привязаны к 127.0.0.1 и изолированы во внутренней сети Docker.${NC}"
+echo -e "  ${BLUE}Примечание: Внутренний порт PostgreSQL (5432) в docker-compose.yml привязан к 127.0.0.1 и изолированы во внутренней сети Docker.${NC}"
 
 # ------------------------------------------------------------------------------
 # 4. Проверка и создание .env с криптостойкими секретами
@@ -190,13 +189,11 @@ if [ ! -f "$ENV_FILE" ] || [[ "$REGEN_ENV" =~ ^[YyДд]$ ]]; then
     # Генерация случайных паролей
     if command -v openssl &> /dev/null; then
         GEN_PG_PASS=$(openssl rand -hex 16)
-        GEN_REDIS_PASS=$(openssl rand -hex 16)
         GEN_SECRET_KEY=$(openssl rand -hex 32)
         GEN_ADMIN_TOKEN=$(openssl rand -hex 24)
         GEN_INTERNAL_API_KEY=$(openssl rand -hex 24)
     else
         GEN_PG_PASS=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 24 | head -n 1)
-        GEN_REDIS_PASS=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 24 | head -n 1)
         GEN_SECRET_KEY=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 48 | head -n 1)
         GEN_ADMIN_TOKEN=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)
         GEN_INTERNAL_API_KEY=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)
@@ -260,12 +257,6 @@ POSTGRES_PASSWORD=${GEN_PG_PASS}
 POSTGRES_PORT=5432
 POSTGRES_HOST=postgres
 
-# ---------- Redis (Очереди задач и кэш) ----------
-REDIS_PASSWORD=${GEN_REDIS_PASS}
-REDIS_URL=redis://:${GEN_REDIS_PASS}@redis:6379/0
-REDIS_HOST=redis
-REDIS_PORT=6379
-
 # ---------- Telegram-бот (aiogram 3) ----------
 TELEGRAM_BOT_TOKEN=${USER_BOT_TOKEN}
 TELEGRAM_ADMIN_CHAT_IDS=${USER_ADMIN_ID}
@@ -279,19 +270,6 @@ INTERNAL_API_KEY=${GEN_INTERNAL_API_KEY}
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES=60
 JWT_REFRESH_TOKEN_EXPIRE_DAYS=30
 JWT_ALGORITHM=HS256
-
-# ---------- Хранилище файлов и сканов чеков ----------
-STORAGE_PATH=/app/storage
-UPLOAD_DIR=/app/storage/uploads
-MAX_UPLOAD_SIZE_MB=20
-ALLOWED_EXTENSIONS=jpg,jpeg,png,webp,tiff,pdf
-
-# ---------- OCR (Tesseract / Распознавание чеков) ----------
-OCR_ENGINE=tesseract
-TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata
-OCR_LANGUAGES=rus+eng
-OCR_DPI=300
-OCR_CONFIDENCE_THRESHOLD=60
 
 # ---------- Валюты и интерфейс ----------
 BASE_CURRENCY=RUB

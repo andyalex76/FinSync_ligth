@@ -1,10 +1,10 @@
 # =====================================================================
 # FinSync (Семейный Бюджет) - Self-Hosted Production Stack
-# Constraints: 100% local processing, no external OCR/LLM APIs, VPS friendly
+# Constraints: 100% local processing, VPS friendly
+# Input: only the Telegram bot and Mini App. The web dashboard is a read-only view.
 # Network Segmentation:
 # - db_net (internal): strictly isolated for PostgreSQL and Backend API
-# - queue_net: Redis broker, Backend API, and OCR Worker
-# - app_net: Backend API, Telegram Bot, and Dashboard Web/PWA
+# - app_net: Backend API, Telegram Bot, and Dashboard Web
 # =====================================================================
 
 services:
@@ -31,24 +31,7 @@ services:
     networks:
       - db_net
 
-  # 2. Redis Message Broker & Cache
-  redis:
-    image: redis:7-alpine
-    container_name: family_budget_redis
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}"]
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 5s
-    networks:
-      - queue_net
-
-  # 3. FastAPI Core Backend (Gateway across DB, Queue, and App networks)
+  # 2. FastAPI Core Backend (Gateway across DB and App networks)
   backend:
     build:
       context: .
@@ -57,8 +40,6 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-budget_admin}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-family_budget}
-      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/0
-      UPLOAD_DIR: /app/storage/uploads
       BASE_CURRENCY: ${BASE_CURRENCY:-RUB}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
@@ -66,12 +47,8 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN must be set in .env}
       TELEGRAM_ADMIN_CHAT_IDS: ${TELEGRAM_ADMIN_CHAT_IDS:-}
       ALLOWED_TELEGRAM_IDS: ${ALLOWED_TELEGRAM_IDS:-}
-    volumes:
-      - uploads_data:/app/storage/uploads
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
@@ -83,7 +60,6 @@ services:
       start_period: 10s
     networks:
       - db_net
-      - queue_net
       - app_net
     deploy:
       resources:
@@ -91,44 +67,7 @@ services:
           cpus: '1.0'
           memory: 512M
 
-  # 4. Local OCR Worker (Tesseract OCR rus+eng - Isolated from database)
-  ocr_worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
-    container_name: family_budget_ocr_worker
-    restart: unless-stopped
-    environment:
-      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/0
-      BACKEND_API_URL: http://backend:8000
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
-      UPLOAD_DIR: /app/storage/uploads
-      TESSDATA_PREFIX: /usr/share/tesseract-ocr/5/tessdata
-      OMP_THREAD_LIMIT: "1"
-    volumes:
-      - uploads_data:/app/storage/uploads
-    depends_on:
-      backend:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "kill -0 1 || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    networks:
-      - queue_net
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          memory: 128M
-
-  # 5. Telegram Bot (aiogram 3 - Isolated from database)
+  # 3. Telegram Bot (aiogram 3 - Isolated from database)
   telegram_bot:
     build:
       context: .
@@ -159,7 +98,7 @@ services:
           cpus: '0.50'
           memory: 256M
 
-  # 6. Web / PWA Dashboard (Isolated from database)
+  # 4. Web Dashboard (read-only view, isolated from database)
   dashboard:
     build:
       context: .
@@ -168,7 +107,6 @@ services:
     restart: unless-stopped
     environment:
       PORT: 3000
-      NEXT_PUBLIC_API_URL: /api
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:
@@ -190,17 +128,12 @@ services:
 
 volumes:
   pg_data:
-  redis_data:
-  uploads_data:
 
 networks:
   # 1. Database network: strictly isolated, only postgres and backend
   db_net:
     driver: bridge
     internal: true
-  # 2. Asynchronous job queue network: redis, backend, and ocr_worker
-  queue_net:
-    driver: bridge
-  # 3. Application network: backend, telegram_bot, and dashboard web interface
+  # 2. Application network: backend, telegram_bot, and dashboard web interface
   app_net:
     driver: bridge

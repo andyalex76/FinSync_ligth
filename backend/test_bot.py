@@ -39,10 +39,10 @@ except ImportError:
 
 try:
     from backend.bot_client import BotAPIClient
-    from backend.bot import escape_markdown_v2, get_draft_keyboard
+    from backend.bot import escape_markdown_v2
 except ImportError:
     from bot_client import BotAPIClient
-    from bot import escape_markdown_v2, get_draft_keyboard
+    from bot import escape_markdown_v2
 
 
 def test_escape_markdown_v2():
@@ -73,14 +73,17 @@ def test_escape_markdown_v2():
     assert escape_markdown_v2(None) == ""
 
 
-def test_get_draft_keyboard():
-    """Verify inline keyboard has confirm and reject buttons with correct callbacks."""
-    kb = get_draft_keyboard("doc-abc-123")
-    buttons = [btn for row in kb.inline_keyboard for btn in row]
+def test_receipt_and_invite_features_are_removed():
+    """Receipts/OCR and the invite-code dialog were removed: access is by Telegram ID allowlist."""
+    try:
+        from backend import bot as bot_module
+    except ImportError:
+        import bot as bot_module
 
-    callbacks = [b.callback_data for b in buttons if b.callback_data]
-    assert "tx_confirm:doc-abc-123" in callbacks
-    assert "tx_reject:doc-abc-123" in callbacks
+    for name in ("handle_receipt_photo", "callback_confirm_transaction", "process_invite_code", "get_draft_keyboard", "BotStates"):
+        assert not hasattr(bot_module, name), name
+    for name in ("upload_document", "get_document_status", "confirm_transaction", "join_family"):
+        assert not hasattr(BotAPIClient, name), name
 
 
 @pytest.mark.asyncio
@@ -207,14 +210,3 @@ async def test_start_without_membership_does_not_wait_for_invite_code():
 
     assert "код приглашения" not in message.answer.call_args.args[0].lower()
     assert await state.get_state() is None
-
-
-def test_invite_code_handler_ignores_commands():
-    """A leftover invite-code state must never swallow /dashboard, /help and other commands."""
-    from types import SimpleNamespace
-
-    from aiogram import F
-
-    only_plain_text = ~F.text.startswith("/")
-    assert only_plain_text.resolve(SimpleNamespace(text="SMIRNOV-77")) is True
-    assert only_plain_text.resolve(SimpleNamespace(text="/dashboard")) is False
