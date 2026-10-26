@@ -222,23 +222,20 @@ async def test_transaction_creation_validation():
 
 @pytest.mark.asyncio
 async def test_healthz_endpoint_contract():
-    """Verify /healthz returns structured status and latency metrics for DB and Redis."""
+    """Verify /healthz returns structured status and latency metrics for the database."""
     try:
         from httpx import AsyncClient, ASGITransport
-        from backend.main import app, check_database_health, check_redis_health
+        from backend.main import app
     except ImportError:
         try:
             from httpx import AsyncClient, ASGITransport
-            from main import app, check_database_health, check_redis_health
+            from main import app
         except ImportError:
             pytest.skip("FastAPI / httpx not installed in test environment")
             return
 
-    # Patch checks to verify contract
-    with patch("backend.main.check_database_health", new_callable=AsyncMock) as mock_db, \
-         patch("backend.main.check_redis_health", new_callable=AsyncMock) as mock_redis:
+    with patch("backend.main.check_database_health", new_callable=AsyncMock) as mock_db:
         mock_db.return_value = {"status": "ok", "latency_ms": 1.2}
-        mock_redis.return_value = {"status": "ok", "latency_ms": 0.8}
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -248,17 +245,15 @@ async def test_healthz_endpoint_contract():
             assert data["status"] == "ok"
             assert "timestamp" in data
             assert data["checks"]["database"]["status"] == "ok"
-            assert data["checks"]["redis"]["status"] == "ok"
+            assert "redis" not in data["checks"]
 
             # Check /api/healthz alias returns identical structure
             resp_api = await client.get("/api/healthz")
             assert resp_api.status_code == 200
 
-    # Test failure case returns 503
-    with patch("backend.main.check_database_health", new_callable=AsyncMock) as mock_db, \
-         patch("backend.main.check_redis_health", new_callable=AsyncMock) as mock_redis:
+    # Failure case returns 503
+    with patch("backend.main.check_database_health", new_callable=AsyncMock) as mock_db:
         mock_db.return_value = {"status": "error", "error": "Connection refused", "latency_ms": 5.0}
-        mock_redis.return_value = {"status": "ok", "latency_ms": 0.5}
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -270,64 +265,24 @@ async def test_healthz_endpoint_contract():
 
 
 @pytest.mark.asyncio
-async def test_internal_ocr_status_404_for_unknown_doc():
-    """Verify internal document status endpoint requires valid X-Internal-Key (401) and returns 404 for nonexistent document when valid."""
+async def test_removed_receipt_endpoints_are_gone():
+    """Receipt/OCR endpoints no longer exist (404 for authenticated and anonymous callers)."""
+    from httpx import ASGITransport, AsyncClient
     try:
-        from httpx import AsyncClient, ASGITransport
         from backend.main import app
-        import backend.main as main_mod
     except ImportError:
-        pytest.skip("httpx or backend.main not available")
-        return
+        from main import app
 
-    orig_key = main_mod.INTERNAL_API_KEY
-    main_mod.INTERNAL_API_KEY = "test-internal-secret-token"
-
-    try:
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            # 1. Without X-Internal-Key: must return 401
-            unauth_resp = await client.post(
-                "/api/internal/documents/nonexistent-doc-uuid/status",
-                json={"status": "failed"},
-            )
-            assert unauth_resp.status_code == 401
-
-            # 2. With wrong key: must return 401
-            wrong_resp = await client.post(
-                "/api/internal/documents/nonexistent-doc-uuid/status",
-                headers={"X-Internal-Key": "invalid-key"},
-                json={"status": "failed"},
-            )
-            assert wrong_resp.status_code == 401
-
-            # 3. With valid X-Internal-Key: passes auth, returns 404 for unknown doc.
-            # This step needs a live PostgreSQL, so it is skipped when the database is unreachable (CI).
-            try:
-                auth_resp = await client.post(
-                    "/api/internal/documents/nonexistent-doc-uuid/status",
-                    headers={"X-Internal-Key": "test-internal-secret-token"},
-                    json={"status": "failed"},
-                )
-            except Exception as exc:  # no database / tables yet (CI runs this before the e2e test creates them)
-                pytest.skip(f"Database is not ready for the 404 check: {type(exc).__name__}")
-                return
-            assert auth_resp.status_code == 404
-    finally:
-        main_mod.INTERNAL_API_KEY = orig_key
-
-
-def test_verify_internal_key_logic():
-    """Verify internal API key verification rejects missing or mismatched keys."""
-    import hmac
-    configured_key = "worker-secret-test-key-456"
-
-    # Missing or empty
-    assert not bool("" and hmac.compare_digest("worker-secret-test-key-456", ""))
-    # Wrong key
-    assert not bool(configured_key and hmac.compare_digest("wrong-key", configured_key))
-    # Correct key
-    assert bool(configured_key and hmac.compare_digest("worker-secret-test-key-456", configured_key))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+        for method, url in (
+            ("POST", "/api/documents/upload"),
+            ("GET", "/api/documents/abc/status"),
+            ("POST", "/api/internal/documents/abc/status"),
+            ("POST", "/api/internal/documents/abc/ocr-result"),
+            ("POST", "/api/transactions/abc/confirm"),
+        ):
+            resp = await client.request(method, url)
+            assert resp.status_code in (404, 405), (method, url, resp.status_code)
 
 
 def test_structured_logger_kwargs():

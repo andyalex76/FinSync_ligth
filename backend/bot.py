@@ -1,27 +1,24 @@
 """
 Telegram Bot based on aiogram 3.x for FinSync Family Budget.
 Features:
-- /start with family invite code binding (calls /api/auth/telegram & /api/family/join)
-- Quick expense entry (e.g. "540 Кофе", "1450 Продукты #еда") saved to PostgreSQL
-- Photo receipt reception, saved to VPS storage & queued for local Tesseract OCR (rus+eng)
-- Real-time polling of OCR extraction status (/api/documents/{id}/status)
-- Inline keyboard draft review workflow (user confirms or rejects before commit)
-- /dashboard command with live monthly summary and burn-rate forecast from PostgreSQL
+- Access only for Telegram IDs from the allowlist (checked by the bot and by the API)
+- /start authenticates against the backend (/api/auth/telegram, trusted bot key)
+- Quick entry (e.g. "540 Кофе", "+50000 Зарплата", "1450 Продукты #еда") saved to PostgreSQL
+  with an "Отменить" button
+- /dashboard command: live monthly summary and burn-rate forecast, plus a one-time link
+  that opens the web dashboard in the browser
 - Complete MarkdownV2 escaping against user text injection
-- No mock data or simulated responses
 """
 import asyncio
 from datetime import date
-import io
 import logging
 import os
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, WebAppInfo
 
 try:
@@ -71,26 +68,6 @@ def escape_markdown_v2(text: Any) -> str:
         return ""
     escape_chars = r"_*[]()~`>#+-=|{}.!"
     return re.sub(f"([{re.escape(escape_chars)}])", r"\\\1", str(text))
-
-
-class BotStates(StatesGroup):
-    waiting_for_invite_code = State()
-
-
-def get_draft_keyboard(draft_id: str) -> InlineKeyboardMarkup:
-    """Inline buttons to confirm, reject or open Mini App / dashboard."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"tx_confirm:{draft_id}"),
-                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"tx_reject:{draft_id}"),
-            ],
-            [
-                InlineKeyboardButton(text="📱 Открыть Mini App", web_app=WebAppInfo(url=MINI_APP_URL)),
-                InlineKeyboardButton(text="📊 Дашборд", url=DASHBOARD_URL),
-            ],
-        ]
-    )
 
 
 async def dashboard_link(telegram_id: int) -> str:
@@ -146,116 +123,31 @@ async def get_or_create_user_auth(user: types.User, state: FSMContext) -> Tuple[
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     """
-    Handle /start [invite_code].
-    Authenticates user against backend and optionally joins family via invite code.
+    Handle /start. Access is controlled by the Telegram ID allowlist, so an authenticated user
+    (the API found or created their family membership) is simply greeted.
     """
     if not message.from_user:
         return
 
     user_name = escape_markdown_v2(message.from_user.first_name or "друг")
     token, member_id, family_id = await get_or_create_user_auth(message.from_user, state)
+    await state.set_state(None)
 
-    args = message.text.split(maxsplit=1)
-    if len(args) > 1:
-        invite_code = args[1].strip().upper()
-        try:
-            join_res = await api_client.join_family(
-                invite_code=invite_code,
-                display_name=message.from_user.first_name or "Участник",
-                token=token,
-            )
-            new_token = join_res.get("access_token") or token
-            member_id = join_res.get("member_id") or member_id
-            family_name = join_res.get("family_name") or "Семья"
-            await state.update_data(
-                access_token=new_token,
-                member_id=member_id,
-                family_id=join_res.get("family_id"),
-                family_name=family_name,
-            )
-            await state.set_state(None)
-
-            safe_family = escape_markdown_v2(family_name)
-            await message.answer(
-                f"👋 Добро пожаловать, {user_name}\\!\n\n"
-                f"✅ Вы успешно подключены к семье *{safe_family}*\\!\n\n"
-                f"💡 *Как пользоваться ботом:*\n"
-                f"• Отправьте сумму и описание: `540 Кофе`\n"
-                f"• Сфотографируйте чек — локальный Tesseract OCR распознает сумму, магазин и дату\\.\n"
-                f"• Команда /dashboard покажет актуальный бюджет и прогноз\\.",
-                parse_mode="MarkdownV2",
-            )
-            return
-        except Exception as exc:
-            safe_err = escape_markdown_v2(str(exc))
-            await message.answer(
-                f"❌ Не удалось присоединиться по коду `{escape_markdown_v2(invite_code)}`: {safe_err}\n"
-                f"Проверьте код и отправьте его снова:",
-                parse_mode="MarkdownV2",
-            )
-            await state.set_state(BotStates.waiting_for_invite_code)
-            return
-
-    # No invite code in /start. Access is controlled by the Telegram ID allowlist, so an authenticated
-    # user (the API created or found their family membership) is simply greeted.
     if member_id:
-        await state.set_state(None)
         await message.answer(
             f"👋 Привет, {user_name}\\!\n\n"
             f"Вы авторизованы в семейном бюджете\\.\n\n"
             f"💡 *Возможности бота:*\n"
             f"• Введите `650 Обед` для быстрой записи расхода в базу\n"
+            f"• `\\+50000 Зарплата` — доход\n"
             f"• Отправьте /dashboard для проверки баланса и прогноза",
             parse_mode="MarkdownV2",
         )
     else:
-        # Auth failed (backend unavailable) or the family is full. Do not wait for an invite code.
-        await state.set_state(None)
+        # Auth failed (backend unavailable) or the family is full.
         await message.answer(
             "⚠️ Не удалось подключиться к семейному бюджету\\. "
             "Попробуйте позже или сообщите администратору\\.",
-            parse_mode="MarkdownV2",
-        )
-
-
-@dp.message(BotStates.waiting_for_invite_code, F.text, ~F.text.startswith("/"))
-async def process_invite_code(message: types.Message, state: FSMContext):
-    """Process user-submitted invite code via backend API."""
-    if not message.from_user or not message.text:
-        return
-
-    code = message.text.strip().upper()
-    token, member_id, _ = await get_or_create_user_auth(message.from_user, state)
-
-    try:
-        join_res = await api_client.join_family(
-            invite_code=code,
-            display_name=message.from_user.first_name or "Участник",
-            token=token,
-        )
-        new_token = join_res.get("access_token") or token
-        member_id = join_res.get("member_id") or member_id
-        family_name = join_res.get("family_name") or "Семья"
-
-        await state.update_data(
-            access_token=new_token,
-            member_id=member_id,
-            family_id=join_res.get("family_id"),
-            family_name=family_name,
-        )
-        await state.set_state(None)
-
-        safe_family = escape_markdown_v2(family_name)
-        await message.answer(
-            f"✅ Вы успешно привязаны к семье *{safe_family}*\\!\n\n"
-            f"Теперь вы можете отправлять расходы текстом \\(например `540 Кофе`\\) или фото чеков\\.",
-            parse_mode="MarkdownV2",
-        )
-    except Exception as exc:
-        safe_err = escape_markdown_v2(str(exc))
-        await message.answer(
-            f"❌ Неверный код приглашения: {safe_err}\n"
-            f"Попробуйте снова или запросите код у администратора семьи:",
             parse_mode="MarkdownV2",
         )
 
@@ -300,7 +192,7 @@ async def cmd_dashboard(message: types.Message, state: FSMContext):
             f"📈 Прогноз на конец месяца: *{safe_projected} ₽* \\({safe_status}\\)\n"
             f"💵 Доходы: *{safe_income} ₽*\n"
             f"🏦 Баланс: *{safe_savings} ₽*\n\n"
-            f"👇 Полная аналитика и чеки в веб\\-интерфейсе:"
+            f"👇 Полная аналитика в веб\\-интерфейсе:"
         )
 
         await message.answer(
@@ -327,147 +219,9 @@ async def cmd_dashboard(message: types.Message, state: FSMContext):
         )
 
 
-@dp.message(F.photo)
-async def handle_receipt_photo(message: types.Message, state: FSMContext):
-    """
-    Receive receipt photo:
-    1. Download image bytes directly via Telegram Bot API
-    2. Upload to FastAPI /api/documents/upload (persists to VPS local storage & enqueues OCR)
-    3. Poll /api/documents/{id}/status for up to 30s
-    4. When status is 'review_needed', show preview with merchant, sum, date and inline confirm buttons
-    """
-    if not message.from_user or not message.photo:
-        return
-
-    wait_msg = await message.answer(
-        "🔍 *Чек получен\\!* Загружаю файл и запускаю локальный Tesseract OCR \\(rus\\+eng\\)\\.\\.\\.",
-        parse_mode="MarkdownV2",
-    )
-
-    token, member_id, _ = await get_or_create_user_auth(message.from_user, state)
-    photo = message.photo[-1]
-
-    try:
-        file_io = io.BytesIO()
-        await bot.download(photo, destination=file_io)
-        file_bytes = file_io.getvalue()
-
-        upload_res = await api_client.upload_document(
-            token=token,
-            file_bytes=file_bytes,
-            filename=f"tg_{message.from_user.id}_{photo.file_id[:8]}.jpg",
-            member_id=member_id,
-            content_type="image/jpeg",
-        )
-        doc_id = upload_res.get("document_id")
-
-        if not doc_id:
-            raise RuntimeError("Бэкенд не вернул document_id")
-
-        # Poll document status up to 30s (15 attempts * 2s)
-        extraction = {}
-        status = "pending"
-        for _ in range(15):
-            await asyncio.sleep(2)
-            try:
-                status_res = await api_client.get_document_status(token=token, doc_id=doc_id)
-                status = status_res.get("status", "")
-                if status == "review_needed":
-                    extraction = status_res.get("extraction") or {}
-                    break
-                elif status == "failed":
-                    err_detail = status_res.get("error_message") or "Ошибка Tesseract OCR"
-                    raise RuntimeError(err_detail)
-            except Exception as poll_err:
-                if "failed" in str(poll_err):
-                    raise poll_err
-                logger.debug("Polling status error: %s", poll_err)
-
-        if status == "review_needed":
-            merchant = extraction.get("merchant_name") or "Торговая точка"
-            total_kopecks = extraction.get("extracted_total_kopecks") or 0
-            total_rub = total_kopecks / 100.0
-            receipt_date = extraction.get("receipt_date") or date.today().isoformat()
-            confidence = int(round((extraction.get("confidence_score") or 0.85) * 100))
-
-            safe_merchant = escape_markdown_v2(merchant)
-            safe_sum = escape_markdown_v2(f"{total_rub:,.2f} ₽")
-            safe_date = escape_markdown_v2(receipt_date)
-
-            await wait_msg.delete()
-            await message.answer_photo(
-                photo=photo.file_id,
-                caption=(
-                    f"🧾 *Распознан новый чек \\(Черновик\\)*\n\n"
-                    f"🏪 *Магазин:* {safe_merchant}\n"
-                    f"💵 *Сумма:* {safe_sum}\n"
-                    f"📅 *Дата:* {safe_date}\n"
-                    f"🎯 *Уверенность OCR:* {confidence}%\n\n"
-                    f"⚠️ _Операция не сохранена\\. Требуется ваше подтверждение:_"
-                ),
-                parse_mode="MarkdownV2",
-                reply_markup=get_draft_keyboard(doc_id),
-            )
-        else:
-            # Took longer than 30s, inform user they can review in web dashboard
-            await wait_msg.edit_text(
-                f"⏳ *Чек отправлен в очередь OCR*\n\n"
-                f"ID документа: `{escape_markdown_v2(doc_id)}`\n"
-                f"Обработка занимает чуть больше времени\\. Как только распознавание завершится, вы сможете подтвердить его в Web\\-дашборде\\.",
-                parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [InlineKeyboardButton(text="📱 Открыть Web Дашборд", url=DASHBOARD_URL)]
-                    ]
-                ),
-            )
-
-    except Exception as exc:
-        logger.error("Failed to process receipt photo: %s", exc, exc_info=True)
-        safe_err = escape_markdown_v2(str(exc))
-        await wait_msg.edit_text(
-            f"❌ *Ошибка при обработке чека:*\n{safe_err}\n\n"
-            f"Попробуйте отправить более четкое фото чека или введите сумму вручную \\(например `540 Продукты`\\)\\.",
-            parse_mode="MarkdownV2",
-        )
-
-
-@dp.callback_query(F.data.startswith("tx_confirm:"))
-async def callback_confirm_transaction(callback: types.CallbackQuery, state: FSMContext):
-    """Confirm draft OCR transaction in PostgreSQL."""
-    if not callback.data or not callback.message:
-        return
-
-    draft_id = callback.data.split(":", 1)[1]
-    token, _, _ = await get_or_create_user_auth(callback.from_user, state)
-
-    try:
-        conf_res = await api_client.confirm_transaction(token=token, draft_id=draft_id)
-        amount_kopecks = conf_res.get("amount_kopecks")
-        amount_str = f"{amount_kopecks / 100:,.2f} ₽" if amount_kopecks else ""
-        safe_amt = escape_markdown_v2(amount_str)
-
-        await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.reply(
-            f"✅ *Расход подтвержден и записан в базу данных PostgreSQL\\!*\n"
-            + (f"💰 *Сумма:* {safe_amt}\n" if safe_amt else "")
-            + f"📊 Запись добавлена в семейный бюджет\\.",
-            parse_mode="MarkdownV2",
-        )
-        await callback.answer("Подтверждено в PostgreSQL!")
-    except Exception as exc:
-        logger.error("Failed to confirm transaction %s: %s", draft_id, exc)
-        safe_err = escape_markdown_v2(str(exc))
-        await callback.answer(f"Ошибка: {exc}", show_alert=True)
-        await callback.message.reply(
-            f"❌ Ошибка при подтверждении: {safe_err}",
-            parse_mode="MarkdownV2",
-        )
-
-
 @dp.callback_query(F.data.startswith("tx_reject:"))
 async def callback_reject_transaction(callback: types.CallbackQuery, state: FSMContext):
-    """Reject and discard draft transaction in PostgreSQL."""
+    """Cancel a transaction that was just entered."""
     if not callback.data or not callback.message:
         return
 
@@ -481,10 +235,10 @@ async def callback_reject_transaction(callback: types.CallbackQuery, state: FSMC
 
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.reply(
-        "❌ *Черновик чека отклонен и удален из базы данных\\.*",
+        "❌ *Запись отменена\\.*",
         parse_mode="MarkdownV2",
     )
-    await callback.answer("Отклонено")
+    await callback.answer("Отменено")
 
 
 @dp.message(F.text)
@@ -568,7 +322,6 @@ async def handle_quick_entry(message: types.Message, state: FSMContext):
             "💡 *Как вносить данные в бота:*\n\n"
             "• *Расход:* `650 Обед` или `2400 Бензин АИ\\-95 #авто`\n"
             "• *Доход:* `+80000 Зарплата` или `+15000 Премия`\n"
-            "• *Чек:* Отправьте фото кассового чека — локальный OCR распознает его автоматически\\!\n"
             "• *Кнопки:* Нажмите кнопку меню *📱 Бюджет* внизу для открытия Mini App\\.",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(

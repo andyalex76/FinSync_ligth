@@ -2,11 +2,9 @@
 FastAPI Backend for Family Budget MVP.
 Connected to PostgreSQL via SQLAlchemy 2.0 Async (asyncpg).
 Features:
-- Authentication & Family invite codes (up to 5 members)
+- Authentication via Telegram (verified Mini App initData / trusted bot) with an ID allowlist
 - Real PostgreSQL CRUD operations with strict minor-units (kopecks) validation
-- Document upload and tracking pipeline for local Tesseract OCR processing
 - Budgets (Plan / Fact) & End-of-month Forecast calculation
-- Strictly local processing: NO external OCR/LLM APIs!
 """
 import base64
 import calendar
@@ -34,12 +32,9 @@ for _p in [str(_backend_dir), str(_root_dir)]:
 from fastapi import (
     Depends,
     FastAPI,
-    File,
-    Form,
     Header,
     HTTPException,
     Request,
-    UploadFile,
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -88,10 +83,6 @@ try:
         Base,
         Budget,
         Category,
-        Document,
-        DocumentComment,
-        DocumentExtraction,
-        DocumentLineItem,
         Family,
         FamilyMember,
         Fund,
@@ -109,10 +100,6 @@ except ImportError:
         Base,
         Budget,
         Category,
-        Document,
-        DocumentComment,
-        DocumentExtraction,
-        DocumentLineItem,
         Family,
         FamilyMember,
         Fund,
@@ -157,11 +144,6 @@ except ImportError:
         validate_init_data,
         validate_runtime_config,
     )
-
-try:
-    import magic
-except ImportError:
-    magic = None
 
 # ---------------------------------------------------------------------
 # Structured Logging (structlog with fallback to standard logging)
@@ -234,44 +216,13 @@ class StructuredLogger:
 
 logger = StructuredLogger(_raw_logger)
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-OCR_QUEUE_NAME = "ocr_tasks"
-
-_arq_redis_pool = None
-
-
-async def get_arq_redis_pool():
-    """Get or create singleton ARQ Redis connection pool for queuing tasks."""
-    global _arq_redis_pool
-    if _arq_redis_pool is None:
-        try:
-            from arq import create_pool
-            from arq.connections import RedisSettings
-
-            redis_settings = RedisSettings.from_dsn(REDIS_URL)
-            _arq_redis_pool = await create_pool(redis_settings, default_queue_name=OCR_QUEUE_NAME)
-            logger.info("Connected to Redis ARQ pool", queue=OCR_QUEUE_NAME)
-        except Exception as exc:
-            logger.warning("Could not connect to Redis ARQ pool", error=str(exc))
-            return None
-    return _arq_redis_pool
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan event handler to initialize database tables and ARQ pool, and cleanup on shutdown."""
+    """Validate secrets and prepare database tables on startup."""
     # Refuse to start with missing/placeholder secrets or an empty Telegram allowlist.
     validate_runtime_config()
     await init_db()
-    # Eagerly initialize ARQ pool if Redis is accessible
-    await get_arq_redis_pool()
     yield
-    global _arq_redis_pool
-    if _arq_redis_pool:
-        try:
-            await _arq_redis_pool.close()
-        except Exception:
-            pass
 
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
@@ -279,7 +230,7 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 app = FastAPI(
     title="Family Budget API (Семейный Бюджет)",
     version="1.0.0",
-    description="Local self-hosted family budget tracking with PostgreSQL SQLAlchemy Async, Tesseract OCR and aiogram bot integration",
+    description="Local self-hosted family budget tracking with PostgreSQL SQLAlchemy Async and aiogram bot integration",
     lifespan=lifespan,
 )
 
@@ -325,26 +276,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ---------------------------------------------------------------------
-# Storage and Upload Limits
-# ---------------------------------------------------------------------
-STORAGE_PATH = os.getenv("STORAGE_PATH", "/app/storage")
-UPLOAD_DIR = os.getenv("UPLOAD_DIR", STORAGE_PATH)
-MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "20"))
-MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
-ALLOWED_EXTENSIONS = [
-    ext.strip().lower().lstrip(".")
-    for ext in os.getenv("ALLOWED_EXTENSIONS", "jpg,jpeg,png,webp,tiff,pdf").split(",")
-    if ext.strip()
-]
-ALLOWED_MIME_TYPES = {
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-    "image/tiff",
-    "application/pdf",
-}
 
 # ---------------------------------------------------------------------
 # Pydantic Schemas
@@ -406,7 +337,6 @@ class TransactionCreate(BaseModel):
     description: str
     transaction_date: str = Field(..., description="YYYY-MM-DD")
     tags: List[str] = []
-    document_id: Optional[str] = None
 
 
 class BatchSyncItem(BaseModel):
@@ -420,20 +350,12 @@ class BatchSyncItem(BaseModel):
     description: str
     transaction_date: str
     tags: List[str] = []
-    document_id: Optional[str] = None
     created_at: Optional[str] = None
 
 
 class BatchSyncRequest(BaseModel):
     items: List[BatchSyncItem]
     client_time: Optional[str] = None
-
-
-class TransactionConfirm(BaseModel):
-    category_id: Optional[str] = None
-    amount_kopecks: Optional[int] = None
-    description: Optional[str] = None
-    transaction_date: Optional[str] = None
 
 
 class BudgetSetRequest(BaseModel):
@@ -624,43 +546,24 @@ async def check_database_health() -> Dict[str, Any]:
         return {"status": "error", "error": str(exc), "latency_ms": latency_ms}
 
 
-async def check_redis_health() -> Dict[str, Any]:
-    """Check Redis connectivity by sending a PING command."""
-    start = time.perf_counter()
-    try:
-        import redis.asyncio as aioredis
-
-        client = aioredis.from_url(REDIS_URL, socket_timeout=2.0)
-        pong = await client.ping()
-        await client.aclose()
-        latency_ms = round((time.perf_counter() - start) * 1000, 2)
-        if pong:
-            return {"status": "ok", "latency_ms": latency_ms}
-        return {"status": "error", "error": "Redis PING returned unexpected response", "latency_ms": latency_ms}
-    except Exception as exc:
-        latency_ms = round((time.perf_counter() - start) * 1000, 2)
-        return {"status": "error", "error": str(exc), "latency_ms": latency_ms}
-
-
 @app.get(
     "/healthz",
     tags=["System"],
-    summary="Health check probe for database and redis connectivity",
+    summary="Health check probe for database connectivity",
 )
 @app.get(
     "/api/healthz",
     tags=["System"],
-    summary="Health check probe for database and redis connectivity",
+    summary="Health check probe for database connectivity",
 )
 async def healthz():
     """
-    Health check probe verifying PostgreSQL and Redis connections.
-    Returns HTTP 200 when both are operational, HTTP 503 when any dependency is degraded.
+    Health check probe verifying the PostgreSQL connection.
+    Returns HTTP 200 when operational, HTTP 503 when the database is unavailable.
     """
     db_result = await check_database_health()
-    redis_result = await check_redis_health()
 
-    is_healthy = db_result["status"] == "ok" and redis_result["status"] == "ok"
+    is_healthy = db_result["status"] == "ok"
     http_status = status.HTTP_200_OK if is_healthy else status.HTTP_503_SERVICE_UNAVAILABLE
 
     payload = {
@@ -669,7 +572,6 @@ async def healthz():
         "version": "1.0.0",
         "checks": {
             "database": db_result,
-            "redis": redis_result,
         },
     }
 
@@ -1304,7 +1206,6 @@ async def list_transactions(
             "transaction_date": t.transaction_date.isoformat(),
             "status": t.status,
             "tags": [tag.name for tag in t.tags],
-            "document_id": str(t.document_id) if t.document_id else None,
             "created_at": t.created_at.isoformat(),
         }
         for t in transactions
@@ -1385,8 +1286,6 @@ async def create_transaction(
             if expense_cats:
                 cat_uuid = expense_cats[0].id
 
-    doc_uuid = to_uuid(payload.document_id) if payload.document_id else None
-
     try:
         tx_date = date.fromisoformat(payload.transaction_date)
     except ValueError:
@@ -1396,7 +1295,6 @@ async def create_transaction(
         family_id=family.id,
         paid_by_member_id=paid_by_uuid,
         category_id=cat_uuid,
-        document_id=doc_uuid,
         type=payload.type,
         amount_kopecks=payload.amount_kopecks,
         currency=payload.currency,
@@ -1520,77 +1418,6 @@ async def batch_sync_transactions(
     }
 
 
-@app.post("/api/transactions/{draft_id}/confirm", tags=["Transactions"])
-@limiter.limit("60/minute")
-async def confirm_draft_transaction(
-    request: Request,
-    draft_id: str,
-    payload: TransactionConfirm,
-    session: AsyncSession = Depends(get_session),
-    token_data: Dict[str, Any] = Depends(verify_token),
-):
-    """
-    MANDATORY CONFIRMATION STEP: User approves or edits the OCR draft.
-    Transactions are NEVER automatically confirmed without user approval!
-    """
-    tx_uuid = to_uuid(draft_id)
-    stmt = select(Transaction).where(Transaction.id == tx_uuid)
-    tx = (await session.execute(stmt)).scalar_one_or_none()
-
-    if not tx:
-        # Check if draft_id is a document
-        doc_stmt = select(Document).options(selectinload(Document.extraction)).where(Document.id == tx_uuid)
-        doc = (await session.execute(doc_stmt)).scalar_one_or_none()
-        if doc:
-            doc.status = "confirmed"
-            cat_uuid = to_uuid(payload.category_id) if payload.category_id else None
-            amount = payload.amount_kopecks or (
-                doc.extraction.extracted_total_kopecks if doc.extraction else 10000
-            ) or 10000
-            tx_date = (
-                date.fromisoformat(payload.transaction_date)
-                if payload.transaction_date
-                else date.today()
-            )
-
-            tx = Transaction(
-                family_id=doc.family_id,
-                paid_by_member_id=doc.uploaded_by_member_id,
-                category_id=cat_uuid,
-                document_id=doc.id,
-                type="expense",
-                amount_kopecks=amount,
-                currency="RUB",
-                description=payload.description or f"Чек: {doc.file_name}",
-                transaction_date=tx_date,
-                status="confirmed",
-            )
-            session.add(tx)
-            await session.flush()
-        else:
-            raise HTTPException(status_code=404, detail="Черновик транзакции или документ не найден")
-    else:
-        tx.status = "confirmed"
-        if payload.category_id:
-            tx.category_id = to_uuid(payload.category_id)
-        if payload.amount_kopecks:
-            tx.amount_kopecks = payload.amount_kopecks
-        if payload.description:
-            tx.description = payload.description
-        if payload.transaction_date:
-            tx.transaction_date = date.fromisoformat(payload.transaction_date)
-        await session.flush()
-
-    return {
-        "id": draft_id,
-        "status": "confirmed",
-        "category_id": payload.category_id,
-        "amount_kopecks": payload.amount_kopecks,
-        "confirmed_at": datetime.utcnow().isoformat(),
-        "message": "Операция подтверждена и включена в бюджет семьи",
-    }
-
-
 @app.delete("/api/transactions/{draft_id}/reject", tags=["Transactions"])
 @app.post("/api/transactions/{draft_id}/reject", tags=["Transactions"])
 @limiter.limit("60/minute")
@@ -1601,7 +1428,8 @@ async def reject_draft_transaction(
     token_data: Dict[str, Any] = Depends(verify_token),
 ):
     """
-    Reject an inaccurate or duplicate OCR receipt draft.
+    Cancel a transaction entered by mistake (the "Отменить" button in the bot).
+    The row is kept with status 'rejected' and is excluded from all totals.
     """
     tx_uuid = to_uuid(draft_id)
     stmt = select(Transaction).where(Transaction.id == tx_uuid)
@@ -1611,376 +1439,12 @@ async def reject_draft_transaction(
         tx.status = "rejected"
         await session.flush()
 
-    doc_stmt = select(Document).where(Document.id == tx_uuid)
-    doc = (await session.execute(doc_stmt)).scalar_one_or_none()
-    if doc:
-        doc.status = "failed"
-        doc.error_message = "Отклонено пользователем"
-        await session.flush()
-
     return {"status": "rejected", "draft_id": draft_id}
 
 
 # ---------------------------------------------------------------------
-# 5. LOCAL DOCUMENT PIPELINE & TESSERACT OCR
+# 5. DASHBOARD & FORECAST
 # ---------------------------------------------------------------------
-@app.post("/api/documents/upload", tags=["Documents"])
-@limiter.limit("60/minute")
-async def upload_document_for_ocr(
-    request: Request,
-    file: UploadFile = File(...),
-    member_id: Optional[str] = Form(None),
-    session: AsyncSession = Depends(get_session),
-    token_data: Dict[str, Any] = Depends(verify_token),
-):
-    """
-    Upload receipt photo or PDF scan.
-    Saves file to local disk (VPS), creates PostgreSQL records and queues a task for Tesseract OCR Worker.
-    CRITICAL: No external API or cloud LLM calls! Local execution only.
-    """
-    filename = file.filename or "receipt.jpg"
-    file_ext = Path(filename).suffix.lower().lstrip(".")
-
-    # 1. Validate file extension using ALLOWED_EXTENSIONS from environment
-    if file_ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Недопустимое расширение файла .{file_ext}. Разрешенные: {', '.join(ALLOWED_EXTENSIONS)}",
-        )
-
-    # 2. Read file content via file.read()
-    content = await file.read()
-
-    # 3. Validate content size via len(content)
-    file_size = len(content)
-    if file_size == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Загруженный файл пуст. Загрузите действительное изображение чека или PDF-скан.",
-        )
-
-    if file_size > MAX_UPLOAD_SIZE_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Размер файла ({file_size} байт) превышает лимит {MAX_UPLOAD_SIZE_MB} МБ.",
-        )
-
-    # 4. Check MIME type via python-magic (with safe fallback)
-    if magic is not None:
-        try:
-            detected_mime = magic.from_buffer(content[:4096], mime=True)
-        except Exception:
-            detected_mime = file.content_type or "application/octet-stream"
-    else:
-        detected_mime = file.content_type or "application/octet-stream"
-
-    if detected_mime not in ALLOWED_MIME_TYPES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Недопустимый MIME-тип файла: '{detected_mime}'. Разрешены только изображения чеков и PDF.",
-        )
-
-    # 5. Persist file to local disk using Path(UPLOAD_DIR).write_bytes()
-    doc_id = f"doc-{uuid.uuid4().hex[:8]}"
-    upload_dir_path = Path(UPLOAD_DIR)
-    upload_dir_path.mkdir(parents=True, exist_ok=True)
-
-    safe_name = Path(filename).name.replace(" ", "_")
-    saved_file_path = upload_dir_path / f"{doc_id}_{safe_name}"
-    saved_file_path.write_bytes(content)
-
-    # 6. Save metadata record to PostgreSQL
-    family = await get_or_create_default_family(session)
-    mem_uuid = None
-    if member_id:
-        mem_uuid = to_uuid(member_id)
-    elif token_data.get("member_id"):
-        mem_uuid = to_uuid(token_data.get("member_id"))
-    else:
-        user_id_str = token_data.get("user_id")
-        if user_id_str:
-            mem = (await session.execute(
-                select(FamilyMember).where(
-                    FamilyMember.family_id == family.id,
-                    FamilyMember.user_id == to_uuid(user_id_str),
-                )
-            )).scalar_one_or_none()
-            if mem:
-                mem_uuid = mem.id
-        if not mem_uuid:
-            first_mem = (await session.execute(
-                select(FamilyMember).where(
-                    FamilyMember.family_id == family.id,
-                    FamilyMember.is_active.is_(True),
-                ).order_by(FamilyMember.created_at)
-            )).scalars().first()
-            if first_mem:
-                mem_uuid = first_mem.id
-            else:
-                mem_uuid = to_uuid("mem-01")
-
-    sha256 = hashlib.sha256(content).hexdigest()
-
-    doc = Document(
-        id=to_uuid(doc_id),
-        family_id=family.id,
-        uploaded_by_member_id=mem_uuid,
-        file_path=str(saved_file_path),
-        file_name=filename,
-        file_size_bytes=file_size,
-        mime_type=detected_mime,
-        sha256_hash=sha256,
-        status="pending",
-    )
-    session.add(doc)
-    await session.flush()
-
-    # 7. Put OCR task into Redis queue 'ocr_tasks' via ARQ
-    task_queued = False
-    job_id = None
-    try:
-        pool = await get_arq_redis_pool()
-        if pool:
-            job = await pool.enqueue_job(
-                "process_document_task",
-                document_id=str(doc.id),
-                file_path=str(saved_file_path),
-                member_id=str(mem_uuid),
-                family_id=str(family.id),
-                _queue_name=OCR_QUEUE_NAME,
-            )
-            if job:
-                job_id = job.job_id
-                task_queued = True
-                logger.info(f"Enqueued OCR job {job_id} for doc {doc.id} on queue '{OCR_QUEUE_NAME}'")
-    except Exception as exc:
-        logger.warning(f"Failed to enqueue OCR task to Redis queue '{OCR_QUEUE_NAME}': {exc}")
-
-    return {
-        "document_id": str(doc.id),
-        "file_name": filename,
-        "saved_path": str(saved_file_path),
-        "size_bytes": file_size,
-        "mime_type": detected_mime,
-        "member_id": member_id,
-        "status": doc.status,
-        "queued": task_queued,
-        "job_id": job_id,
-        "queue": OCR_QUEUE_NAME,
-        "message": f"Файл успешно сохранен на VPS{' и поставлен в очередь ' + OCR_QUEUE_NAME if task_queued else ''}",
-    }
-
-
-@app.get("/api/documents/{doc_id}/status", tags=["Documents"])
-@limiter.limit("60/minute")
-async def get_document_status(
-    request: Request,
-    doc_id: str,
-    session: AsyncSession = Depends(get_session),
-    token_data: Dict[str, Any] = Depends(verify_token),
-):
-    """
-    Poll processing status (pending -> processing -> review_needed) from PostgreSQL.
-    """
-    doc_uuid = to_uuid(doc_id)
-    stmt = (
-        select(Document)
-        .options(selectinload(Document.extraction))
-        .where(Document.id == doc_uuid)
-    )
-    doc = (await session.execute(stmt)).scalar_one_or_none()
-
-    if not doc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Документ {doc_id} не найден в базе данных",
-        )
-
-    extraction_data = None
-    if doc.extraction:
-        extraction_data = {
-            "merchant_name": doc.extraction.merchant_name,
-            "merchant_inn": doc.extraction.merchant_inn,
-            "extracted_total_kopecks": doc.extraction.extracted_total_kopecks,
-            "confidence_score": float(doc.extraction.confidence_score) if doc.extraction.confidence_score else 0.0,
-            "suggested_category_id": str(doc.extraction.suggested_category_id) if doc.extraction.suggested_category_id else None,
-            "receipt_date": doc.extraction.receipt_date.isoformat() if doc.extraction.receipt_date else None,
-            "raw_ocr_text": doc.extraction.raw_ocr_text or "",
-        }
-
-    return {
-        "document_id": str(doc.id),
-        "status": doc.status,
-        "error_message": doc.error_message,
-        "extraction": extraction_data,
-    }
-
-
-# ---------------------------------------------------------------------
-# 5.1 INTERNAL WORKER CALLBACKS (Allows OCR worker to run without Postgres network access)
-# ---------------------------------------------------------------------
-INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
-
-
-async def verify_internal_key(
-    x_internal_key: Optional[str] = Header(None, alias="X-Internal-Key"),
-) -> Dict[str, str]:
-    """Защита эндпоинтов /api/internal/* — вызываются только OCR-воркером.
-    Использует отдельный INTERNAL_API_KEY (НЕ admin-токен, НЕ SECRET_KEY),
-    чтобы минимизировать поверхность атаки при компрометации воркера.
-    """
-    if not INTERNAL_API_KEY or not x_internal_key or not hmac.compare_digest(x_internal_key, INTERNAL_API_KEY):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Требуется заголовок X-Internal-Key с валидным INTERNAL_API_KEY",
-        )
-    return {"sub": "ocr_worker", "auth_method": "internal_key"}
-
-
-class InternalDocumentStatusUpdate(BaseModel):
-    status: str
-    error_message: Optional[str] = None
-
-
-class InternalOCRResultPayload(BaseModel):
-    raw_ocr_text: Optional[str] = None
-    merchant_name: Optional[str] = None
-    merchant_inn: Optional[str] = None
-    receipt_date: Optional[str] = None
-    total_amount_kopecks: Optional[int] = None
-    confidence_score: Optional[float] = 0.5
-    suggested_category_id: Optional[str] = None
-    status: str = "review_needed"
-
-
-@app.post("/api/internal/documents/{doc_id}/status", tags=["Internal"])
-async def update_internal_document_status(
-    doc_id: str,
-    payload: InternalDocumentStatusUpdate,
-    session: AsyncSession = Depends(get_session),
-    _: Dict[str, str] = Depends(verify_internal_key),
-):
-    """
-    Internal callback for OCR worker to report progress (e.g. processing or failed).
-    Requires no direct database connection from the worker container.
-    """
-    doc_uuid = to_uuid(doc_id)
-    stmt = select(Document).where(Document.id == doc_uuid)
-    doc = (await session.execute(stmt)).scalar_one_or_none()
-
-    if not doc:
-        raise HTTPException(status_code=404, detail="Документ не найден")
-
-    doc.status = payload.status
-    if payload.error_message is not None:
-        doc.error_message = payload.error_message
-    await session.commit()
-    return {"status": "ok", "document_id": str(doc.id), "doc_status": doc.status}
-
-
-@app.post("/api/internal/documents/{doc_id}/ocr-result", tags=["Internal"])
-async def save_internal_ocr_result(
-    doc_id: str,
-    payload: InternalOCRResultPayload,
-    session: AsyncSession = Depends(get_session),
-    _: Dict[str, str] = Depends(verify_internal_key),
-):
-    """
-    Internal callback for OCR worker to persist extracted fields & draft transaction.
-    Keeps PostgreSQL strictly isolated from worker container.
-    """
-    doc_uuid = to_uuid(doc_id)
-    doc_stmt = select(Document).where(Document.id == doc_uuid)
-    doc = (await session.execute(doc_stmt)).scalar_one_or_none()
-
-    if not doc:
-        raise HTTPException(status_code=404, detail="Документ не найден")
-
-    doc.status = payload.status or "review_needed"
-    doc.error_message = None
-
-    cat_slug = payload.suggested_category_id
-    cat_uuid = to_uuid(cat_slug) if cat_slug else None
-
-    try:
-        receipt_dt = date.fromisoformat(payload.receipt_date) if payload.receipt_date else date.today()
-    except Exception:
-        receipt_dt = date.today()
-
-    # Create or update DocumentExtraction
-    ext_stmt = select(DocumentExtraction).where(DocumentExtraction.document_id == doc_uuid)
-    doc_ext = (await session.execute(ext_stmt)).scalar_one_or_none()
-    if not doc_ext:
-        doc_ext = DocumentExtraction(
-            document_id=doc_uuid,
-            merchant_name=payload.merchant_name,
-            merchant_inn=payload.merchant_inn,
-            receipt_date=receipt_dt,
-            extracted_total_kopecks=payload.total_amount_kopecks,
-            confidence_score=payload.confidence_score or 0.5,
-            suggested_category_id=cat_uuid,
-            raw_ocr_text=payload.raw_ocr_text,
-            ocr_engine="tesseract-5.4-rus+eng",
-        )
-        session.add(doc_ext)
-    else:
-        doc_ext.merchant_name = payload.merchant_name
-        doc_ext.merchant_inn = payload.merchant_inn
-        doc_ext.receipt_date = receipt_dt
-        doc_ext.extracted_total_kopecks = payload.total_amount_kopecks
-        doc_ext.confidence_score = payload.confidence_score or 0.5
-        doc_ext.suggested_category_id = cat_uuid
-        doc_ext.raw_ocr_text = payload.raw_ocr_text
-
-    # Create or update Draft Transaction in review_needed status
-    tx_stmt = select(Transaction).where(Transaction.document_id == doc_uuid)
-    tx = (await session.execute(tx_stmt)).scalar_one_or_none()
-
-    amount_kopecks = payload.total_amount_kopecks or 50000
-    desc = f"Чек: {payload.merchant_name or 'Магазин'}"
-
-    if not tx:
-        tx = Transaction(
-            family_id=doc.family_id,
-            paid_by_member_id=doc.uploaded_by_member_id,
-            category_id=cat_uuid,
-            document_id=doc.id,
-            type="expense",
-            amount_kopecks=amount_kopecks,
-            currency="RUB",
-            description=desc,
-            transaction_date=receipt_dt,
-            status="review_needed",
-        )
-        session.add(tx)
-        await session.flush()
-
-        # Split transaction equally among active family members
-        mem_stmt = select(FamilyMember).where(
-            FamilyMember.family_id == doc.family_id,
-            FamilyMember.is_active.is_(True),
-        )
-        members = (await session.execute(mem_stmt)).scalars().all()
-        if members:
-            split_share = amount_kopecks // len(members)
-            remainder = amount_kopecks % len(members)
-            for idx, m in enumerate(members):
-                share = split_share + (remainder if idx == 0 else 0)
-                session.add(TransactionSplit(transaction_id=tx.id, member_id=m.id, share_kopecks=share))
-    else:
-        tx.amount_kopecks = amount_kopecks
-        tx.category_id = cat_uuid
-        tx.description = desc
-        tx.transaction_date = receipt_dt
-        tx.status = "review_needed"
-
-    await session.commit()
-    return {
-        "status": "ok",
-        "document_id": str(doc.id),
-        "transaction_id": str(tx.id),
-        "tx_status": tx.status,
-    }
 @app.get("/api/dashboard/summary", tags=["Dashboard"])
 @limiter.limit("60/minute")
 async def get_dashboard_summary(
@@ -2024,18 +1488,12 @@ async def get_dashboard_summary(
     )
     drafts_count = (await session.execute(draft_stmt)).scalar_one()
 
-    doc_draft_stmt = select(func.count(Document.id)).where(
-        Document.family_id == family.id,
-        Document.status == "review_needed",
-    )
-    doc_drafts = (await session.execute(doc_draft_stmt)).scalar_one()
-
     return {
         "period": month_str,
         "total_income_kopecks": total_income,
         "total_expenses_kopecks": total_expenses,
         "net_savings_kopecks": total_income - total_expenses,
-        "drafts_pending_count": drafts_count + doc_drafts,
+        "drafts_pending_count": drafts_count,
     }
 
 
@@ -2178,10 +1636,10 @@ async def reset_database_and_cache(
     token_data: Dict[str, Any] = Depends(verify_token),
 ):
     """
-    Reset PostgreSQL database tables, OCR processing queue, and server cache.
+    Reset PostgreSQL database tables.
     Protected endpoint: requires administrative authentication.
     mode:
-      - 'clean': wipe transactions, drafts, and uploaded receipts for clean manual testing.
+      - 'clean': wipe transactions for clean manual testing.
       - 'demo': reset to initial demo seeds.
     """
     mode = payload.mode if payload and payload.mode else "clean"
@@ -2190,10 +1648,6 @@ async def reset_database_and_cache(
     await session.execute(delete(TransactionSplit))
     await session.execute(delete(TransactionTag))
     await session.execute(delete(Transaction))
-    await session.execute(delete(DocumentLineItem))
-    await session.execute(delete(DocumentExtraction))
-    await session.execute(delete(DocumentComment))
-    await session.execute(delete(Document))
 
     if mode == "demo":
         await session.execute(delete(Budget))
@@ -2209,14 +1663,11 @@ async def reset_database_and_cache(
     return {
         "status": "success",
         "mode": mode,
-        "message": "База данных PostgreSQL и серверный кэш успешно сброшены",
+        "message": "Данные PostgreSQL успешно сброшены",
         "tables_cleared": [
             "transactions",
             "transaction_splits",
             "transaction_tags",
-            "document_extractions",
-            "document_line_items",
-            "documents",
         ],
         "reset_at": datetime.utcnow().isoformat(),
         "authorized_by": admin.get("sub", "admin"),

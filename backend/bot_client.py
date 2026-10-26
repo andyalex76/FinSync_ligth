@@ -3,7 +3,6 @@ HTTP Client for FinSync FastAPI backend used by Telegram Bot (aiogram 3).
 Connects to the local FastAPI backend to execute authenticated PostgreSQL queries
 and document uploads without mock data.
 """
-import asyncio
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -81,32 +80,6 @@ class BotAPIClient:
                 raise RuntimeError(f"Login link failed with HTTP {resp.status}")
             return (await resp.json())["code"]
 
-    async def join_family(
-        self,
-        invite_code: str,
-        display_name: str,
-        token: str,
-        avatar_emoji: str = "👤",
-    ) -> Dict[str, Any]:
-        """
-        Bind user to a family via invite code (e.g. SMIRNOV-77).
-        """
-        session = await self.get_session()
-        payload = {
-            "invite_code": invite_code.strip().upper(),
-            "display_name": display_name,
-            "avatar_emoji": avatar_emoji,
-        }
-        url = f"{self.base_url}/api/family/join"
-        headers = self._auth_headers(token)
-        headers["Content-Type"] = "application/json"
-
-        async with session.post(url, json=payload, headers=headers) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            error_data = await resp.json() if resp.content_type == "application/json" else {"detail": await resp.text()}
-            raise RuntimeError(error_data.get("detail", f"HTTP {resp.status}"))
-
     async def get_dashboard_summary(self, token: str) -> Dict[str, Any]:
         """
         Fetch real dashboard summary from PostgreSQL:
@@ -166,71 +139,9 @@ class BotAPIClient:
             err = await resp.text()
             raise RuntimeError(f"Failed to create transaction: HTTP {resp.status} - {err}")
 
-    async def upload_document(
-        self,
-        token: str,
-        file_bytes: bytes,
-        filename: str,
-        member_id: Optional[str] = None,
-        content_type: str = "image/jpeg",
-    ) -> Dict[str, Any]:
-        """
-        Upload receipt photo/pdf scan to VPS local disk and enqueue OCR task in Redis.
-        """
-        session = await self.get_session()
-        url = f"{self.base_url}/api/documents/upload"
-        data = aiohttp.FormData()
-        data.add_field(
-            "file",
-            file_bytes,
-            filename=filename,
-            content_type=content_type,
-        )
-        data.add_field("member_id", str(member_id or "mem-01"))
-
-        async with session.post(url, data=data, headers=self._auth_headers(token)) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            err = await resp.text()
-            raise RuntimeError(f"Document upload failed: HTTP {resp.status} - {err}")
-
-    async def get_document_status(self, token: str, doc_id: str) -> Dict[str, Any]:
-        """
-        Poll document OCR processing status:
-        returns status ('pending', 'processing', 'review_needed', 'confirmed', 'failed')
-        and extraction dict.
-        """
-        session = await self.get_session()
-        url = f"{self.base_url}/api/documents/{doc_id}/status"
-        async with session.get(url, headers=self._auth_headers(token)) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            err = await resp.text()
-            raise RuntimeError(f"Failed to get document status: HTTP {resp.status} - {err}")
-
-    async def confirm_transaction(
-        self,
-        token: str,
-        draft_id: str,
-        payload: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Confirm an OCR draft transaction in PostgreSQL.
-        """
-        session = await self.get_session()
-        url = f"{self.base_url}/api/transactions/{draft_id}/confirm"
-        headers = self._auth_headers(token)
-        headers["Content-Type"] = "application/json"
-
-        async with session.post(url, json=payload or {}, headers=headers) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            err = await resp.text()
-            raise RuntimeError(f"Failed to confirm transaction: HTTP {resp.status} - {err}")
-
     async def reject_transaction(self, token: str, draft_id: str) -> Dict[str, Any]:
         """
-        Reject/discard an OCR draft transaction in PostgreSQL.
+        Cancel a transaction entered by mistake (status becomes "rejected").
         """
         session = await self.get_session()
         url = f"{self.base_url}/api/transactions/{draft_id}/reject"
