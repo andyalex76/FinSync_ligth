@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { Bot, Sun, Moon, Wallet, HardDriveDownload, Settings } from 'lucide-react';
+import { Bot, Sun, Moon, Wallet, Settings } from 'lucide-react';
 import { Family, FamilyMember } from '../types';
 import { PWAInstallButton } from './PWAInstallButton';
 import { SyncStatusBadge } from './SyncStatusBadge';
@@ -12,7 +12,6 @@ interface HeaderProps {
   activeTab: 'overview' | 'budgets' | 'transactions' | 'members';
   setActiveTab: (tab: 'overview' | 'budgets' | 'transactions' | 'members') => void;
   onOpenConnectModal: () => void;
-  onOpenBackupModal: () => void;
   onOpenSetupWizard: () => void;
   isDark: boolean;
   onToggleTheme: () => void;
@@ -25,7 +24,6 @@ export const Header: React.FC<HeaderProps> = ({
   activeTab,
   setActiveTab,
   onOpenConnectModal,
-  onOpenBackupModal,
   onOpenSetupWizard,
   isDark,
   onToggleTheme,
@@ -123,24 +121,13 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           </nav>
 
-          {/* Zone 3: Actions (Telegram Bot, Backup, Theme, Language) */}
+          {/* Zone 3: Actions (Telegram Bot, Theme, Language) */}
           <div className="flex items-center space-x-1 sm:space-x-2 shrink-0">
             {/* Language Switcher */}
             <LanguageSwitcher />
 
             {/* PWA In-App Install prompt button */}
             <PWAInstallButton />
-
-            {/* Data Export / Backup Modal */}
-            <button
-              type="button"
-              onClick={onOpenBackupModal}
-              title="Экспорт и резервное копирование"
-              aria-label="Экспорт и резервное копирование"
-              className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center dark:text-slate-400 text-slate-600 dark:hover:text-white hover:text-slate-900 dark:hover:bg-slate-800/80 hover:bg-slate-100 border dark:border-slate-800/60 border-slate-200 rounded-xl transition-all active:scale-95"
-            >
-              <HardDriveDownload className="w-4 h-4" />
-            </button>
 
             {/* Theme Toggle Button */}
             <button

@@ -23,8 +23,6 @@ import {
 } from 'lucide-react';
 
 // Lazy loaded modals to minimize initial bundle size
-const ArchitectureViewerModal = React.lazy(() => import('./components/ArchitectureViewerModal'));
-const BackupExportModal = React.lazy(() => import('./components/BackupExportModal'));
 const FamilySetupWizard = React.lazy(() => import('./components/FamilySetupWizard'));
 
 function Spinner() {
@@ -57,12 +55,6 @@ function FamilyAppContent() {
     handleDeleteSavingGoal,
     handleDepositSavingGoal,
     handleWithdrawSavingGoal,
-    handleRestoreData,
-    handleResetData,
-    openArchModal,
-    closeArchModal,
-    openBackupModal,
-    closeBackupModal,
     openSetupWizard,
     closeSetupWizard,
     setActiveTab,
@@ -82,11 +74,6 @@ function FamilyAppContent() {
   const handleNavigateToSavings = useCallback(() => {
     setActiveTab('budgets');
   }, [setActiveTab]);
-
-  const handleOpenSetupFromBackup = useCallback(() => {
-    closeBackupModal();
-    openSetupWizard();
-  }, [closeBackupModal, openSetupWizard]);
 
   const handleSelectOverviewTab = useCallback(() => {
     setActiveTab('overview');
@@ -125,7 +112,6 @@ function FamilyAppContent() {
         activeTab={state.activeTab}
         setActiveTab={setActiveTab}
         onOpenConnectModal={() => setIsConnectModalOpen(true)}
-        onOpenBackupModal={openBackupModal}
         onOpenSetupWizard={openSetupWizard}
         isDark={state.isDark}
         onToggleTheme={toggleTheme}
@@ -304,31 +290,6 @@ function FamilyAppContent() {
 
       {/* Lazy Loaded Modals wrapped in Suspense with Spinner */}
       <Suspense fallback={<Spinner />}>
-        {state.isArchModalOpen && (
-          <ArchitectureViewerModal
-            isOpen={state.isArchModalOpen}
-            onClose={closeArchModal}
-          />
-        )}
-
-        {state.isBackupModalOpen && (
-          <BackupExportModal
-            isOpen={state.isBackupModalOpen}
-            onClose={closeBackupModal}
-            family={state.family}
-            members={state.members}
-            categories={state.categories}
-            budgets={state.budgets}
-            transactions={state.transactions}
-            savingsGoals={state.savingsGoals}
-            merchantRules={state.merchantRules}
-            onRestoreData={handleRestoreData}
-            onResetData={handleResetData}
-            onOpenArchModal={openArchModal}
-            onOpenSetupWizard={handleOpenSetupFromBackup}
-          />
-        )}
-
         {state.isSetupWizardOpen && (
           <FamilySetupWizard
             isOpen={state.isSetupWizardOpen}
