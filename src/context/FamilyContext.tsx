@@ -19,14 +19,6 @@ import {
   MerchantRule, 
   FamilySetupData 
 } from '../types';
-import { 
-  INITIAL_FAMILY, 
-  INITIAL_MEMBERS, 
-  INITIAL_CATEGORIES, 
-  INITIAL_BUDGETS, 
-  INITIAL_TRANSACTIONS, 
-  INITIAL_SAVINGS_GOALS 
-} from '../data/initialData';
 import { StorageService } from '../utils/storage';
 import { backgroundSyncService } from '../utils/backgroundSync';
 import { useBackgroundSync } from '../hooks/useBackgroundSync';
@@ -43,15 +35,10 @@ export interface FamilyState {
   activeTab: 'overview' | 'budgets' | 'transactions' | 'members';
   isDark: boolean;
   isSetupWizardOpen: boolean;
-  isAddModalOpen: boolean;
-  isScanModalOpen: boolean;
-  isBotModalOpen: boolean;
-  isArchModalOpen: boolean;
-  isBackupModalOpen: boolean;
   editingTransaction: Transaction | null;
 }
 
-export type ModalName = 'add' | 'scan' | 'bot' | 'arch' | 'backup' | 'setupWizard';
+export type ModalName = 'setupWizard';
 
 export type FamilyAction =
   | { type: 'SET_ACTIVE_TAB'; payload: 'overview' | 'budgets' | 'transactions' | 'members' }
@@ -72,25 +59,6 @@ export type FamilyAction =
   | { type: 'DEPOSIT_SAVING_GOAL'; payload: { goalId: string; amountKopecks: number; tx: Transaction } }
   | { type: 'WITHDRAW_SAVING_GOAL'; payload: { goalId: string; amountKopecks: number; tx: Transaction } }
   | { type: 'CONFIRM_TELEGRAM_DRAFT'; payload: { tx: Transaction; goalId?: string } }
-  | { type: 'RESTORE_DATA'; payload: {
-      family?: Family;
-      members?: FamilyMember[];
-      categories?: Category[];
-      budgets?: Budget[];
-      transactions?: Transaction[];
-      merchantRules?: MerchantRule[];
-      savingsGoals?: SavingsGoal[];
-    } }
-  | { type: 'RESET_CLEAN' }
-  | { type: 'RESET_DEMO'; payload: {
-      family: Family;
-      members: FamilyMember[];
-      categories: Category[];
-      budgets: Budget[];
-      transactions: Transaction[];
-      savingsGoals: SavingsGoal[];
-      merchantRules: MerchantRule[];
-    } }
   | { type: 'COMPLETE_SETUP'; payload: {
       family: Family;
       members: FamilyMember[];
@@ -118,11 +86,6 @@ export function getInitialFamilyState(): FamilyState {
     activeTab: 'overview',
     isDark: savedTheme ? savedTheme === 'dark' : true,
     isSetupWizardOpen: false,
-    isAddModalOpen: false,
-    isScanModalOpen: false,
-    isBotModalOpen: false,
-    isArchModalOpen: false,
-    isBackupModalOpen: false,
     editingTransaction: null,
   };
 }
@@ -140,22 +103,12 @@ export function familyReducer(state: FamilyState, action: FamilyAction): FamilyS
 
     case 'OPEN_MODAL':
       switch (action.payload) {
-        case 'add': return { ...state, isAddModalOpen: true };
-        case 'scan': return { ...state, isScanModalOpen: true };
-        case 'bot': return { ...state, isBotModalOpen: true };
-        case 'arch': return { ...state, isArchModalOpen: true };
-        case 'backup': return { ...state, isBackupModalOpen: true };
         case 'setupWizard': return { ...state, isSetupWizardOpen: true };
       }
       return state;
 
     case 'CLOSE_MODAL':
       switch (action.payload) {
-        case 'add': return { ...state, isAddModalOpen: false };
-        case 'scan': return { ...state, isScanModalOpen: false };
-        case 'bot': return { ...state, isBotModalOpen: false };
-        case 'arch': return { ...state, isArchModalOpen: false };
-        case 'backup': return { ...state, isBackupModalOpen: false };
         case 'setupWizard': return { ...state, isSetupWizardOpen: false };
       }
       return state;
@@ -304,39 +257,6 @@ export function familyReducer(state: FamilyState, action: FamilyAction): FamilyS
       };
     }
 
-    case 'RESTORE_DATA':
-      return {
-        ...state,
-        ...(action.payload.family ? { family: action.payload.family } : {}),
-        ...(action.payload.members ? { members: action.payload.members } : {}),
-        ...(action.payload.categories ? { categories: action.payload.categories } : {}),
-        ...(action.payload.budgets ? { budgets: action.payload.budgets } : {}),
-        ...(action.payload.transactions ? { transactions: action.payload.transactions } : {}),
-        ...(action.payload.savingsGoals ? { savingsGoals: action.payload.savingsGoals } : {}),
-        ...(action.payload.merchantRules ? { merchantRules: action.payload.merchantRules } : {}),
-      };
-
-    case 'RESET_CLEAN':
-      return {
-        ...state,
-        transactions: [],
-        members: state.members.map((m) => ({ ...m, balanceKopecks: 0 })),
-        savingsGoals: state.savingsGoals.map((g) => ({ ...g, currentKopecks: 0 })),
-        isSetupWizardOpen: true,
-      };
-
-    case 'RESET_DEMO':
-      return {
-        ...state,
-        family: action.payload.family,
-        members: action.payload.members,
-        categories: action.payload.categories,
-        budgets: action.payload.budgets,
-        transactions: action.payload.transactions,
-        savingsGoals: action.payload.savingsGoals,
-        merchantRules: action.payload.merchantRules,
-      };
-
     case 'COMPLETE_SETUP':
       return {
         ...state,
@@ -392,27 +312,7 @@ export interface FamilyContextValue {
     goalId?: string;
     subCategory?: string;
   }) => void;
-  handleRestoreData: (restored: {
-    family?: Family;
-    members?: FamilyMember[];
-    categories?: Category[];
-    budgets?: Budget[];
-    transactions?: Transaction[];
-    merchantRules?: MerchantRule[];
-    savingsGoals?: SavingsGoal[];
-  }) => void;
-  handleResetData: (mode: 'clean' | 'demo') => Promise<void>;
   // Modal helpers
-  openAddModal: () => void;
-  closeAddModal: () => void;
-  openScanModal: () => void;
-  closeScanModal: () => void;
-  openBotModal: () => void;
-  closeBotModal: () => void;
-  openArchModal: () => void;
-  closeArchModal: () => void;
-  openBackupModal: () => void;
-  closeBackupModal: () => void;
   openSetupWizard: () => void;
   closeSetupWizard: () => void;
   setEditingTransaction: (tx: Transaction | null) => void;
@@ -734,72 +634,7 @@ export function FamilyProvider({ children }: { children: ReactNode }) {
     backgroundSyncService.bufferTransaction('create', newTx);
   }, [state.family.id, state.members, isOnline]);
 
-  const handleRestoreData = useCallback((restored: {
-    family?: Family;
-    members?: FamilyMember[];
-    categories?: Category[];
-    budgets?: Budget[];
-    transactions?: Transaction[];
-    merchantRules?: MerchantRule[];
-    savingsGoals?: SavingsGoal[];
-  }) => {
-    if (restored.merchantRules) {
-      StorageService.setMerchantRules(restored.merchantRules);
-    }
-    dispatch({ type: 'RESTORE_DATA', payload: restored });
-    confetti({ particleCount: 50, spread: 60 });
-  }, []);
-
-  const handleResetData = useCallback(async (mode: 'clean' | 'demo') => {
-    try {
-      await authFetch('/api/system/reset', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Admin-Token': 'finsync-admin-secret',
-        },
-        body: JSON.stringify({ mode }),
-      });
-    } catch (err) {
-      console.warn('Backend API reset fallback:', err);
-    }
-
-    backgroundSyncService.clearQueue();
-
-    if (mode === 'clean') {
-      StorageService.wipeTransactionsAndSyncQueue();
-      StorageService.setConfigured(false);
-      dispatch({ type: 'RESET_CLEAN' });
-    } else {
-      StorageService.resetToInitial();
-      dispatch({
-        type: 'RESET_DEMO',
-        payload: {
-          family: INITIAL_FAMILY,
-          members: INITIAL_MEMBERS,
-          categories: INITIAL_CATEGORIES,
-          budgets: INITIAL_BUDGETS,
-          transactions: INITIAL_TRANSACTIONS,
-          savingsGoals: INITIAL_SAVINGS_GOALS,
-          merchantRules: StorageService.getMerchantRules(),
-        },
-      });
-    }
-
-    confetti({ particleCount: 60, spread: 70 });
-  }, []);
-
   // Modal helpers
-  const openAddModal = useCallback(() => dispatch({ type: 'OPEN_MODAL', payload: 'add' }), []);
-  const closeAddModal = useCallback(() => dispatch({ type: 'CLOSE_MODAL', payload: 'add' }), []);
-  const openScanModal = useCallback(() => dispatch({ type: 'OPEN_MODAL', payload: 'scan' }), []);
-  const closeScanModal = useCallback(() => dispatch({ type: 'CLOSE_MODAL', payload: 'scan' }), []);
-  const openBotModal = useCallback(() => dispatch({ type: 'OPEN_MODAL', payload: 'bot' }), []);
-  const closeBotModal = useCallback(() => dispatch({ type: 'CLOSE_MODAL', payload: 'bot' }), []);
-  const openArchModal = useCallback(() => dispatch({ type: 'OPEN_MODAL', payload: 'arch' }), []);
-  const closeArchModal = useCallback(() => dispatch({ type: 'CLOSE_MODAL', payload: 'arch' }), []);
-  const openBackupModal = useCallback(() => dispatch({ type: 'OPEN_MODAL', payload: 'backup' }), []);
-  const closeBackupModal = useCallback(() => dispatch({ type: 'CLOSE_MODAL', payload: 'backup' }), []);
   const openSetupWizard = useCallback(() => dispatch({ type: 'OPEN_MODAL', payload: 'setupWizard' }), []);
   const closeSetupWizard = useCallback(() => dispatch({ type: 'CLOSE_MODAL', payload: 'setupWizard' }), []);
   const setEditingTransaction = useCallback((tx: Transaction | null) => dispatch({ type: 'SET_EDITING_TRANSACTION', payload: tx }), []);
@@ -825,18 +660,6 @@ export function FamilyProvider({ children }: { children: ReactNode }) {
     handleDepositSavingGoal,
     handleWithdrawSavingGoal,
     handleConfirmTelegramDraft,
-    handleRestoreData,
-    handleResetData,
-    openAddModal,
-    closeAddModal,
-    openScanModal,
-    closeScanModal,
-    openBotModal,
-    closeBotModal,
-    openArchModal,
-    closeArchModal,
-    openBackupModal,
-    closeBackupModal,
     openSetupWizard,
     closeSetupWizard,
     setEditingTransaction,
@@ -863,18 +686,6 @@ export function FamilyProvider({ children }: { children: ReactNode }) {
     handleDepositSavingGoal,
     handleWithdrawSavingGoal,
     handleConfirmTelegramDraft,
-    handleRestoreData,
-    handleResetData,
-    openAddModal,
-    closeAddModal,
-    openScanModal,
-    closeScanModal,
-    openBotModal,
-    closeBotModal,
-    openArchModal,
-    closeArchModal,
-    openBackupModal,
-    closeBackupModal,
     openSetupWizard,
     closeSetupWizard,
     setEditingTransaction,
