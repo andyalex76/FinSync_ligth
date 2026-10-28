@@ -14,12 +14,12 @@ from datetime import date
 import logging
 import os
 import re
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, types
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, WebAppInfo
+from aiogram.types import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, WebAppInfo
 
 try:
     from backend.bot_client import BotAPIClient
@@ -140,6 +140,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
             f"💡 *Возможности бота:*\n"
             f"• Введите `650 Обед` для быстрой записи расхода в базу\n"
             f"• `\\+50000 Зарплата` — доход\n"
+            f"• `/transfer Борис 5000` — перевод участнику, /debts — кто кому должен\n"
             f"• Отправьте /dashboard для проверки баланса и прогноза",
             parse_mode="MarkdownV2",
         )
@@ -219,6 +220,130 @@ async def cmd_dashboard(message: types.Message, state: FSMContext):
         )
 
 
+# ---------------------------------------------------------------------------
+# Transfers between family members (/transfer, /debts)
+# ---------------------------------------------------------------------------
+_AMOUNT_RE = re.compile(r"^\d+(?:[.,]\d{1,2})?$")
+
+
+def parse_amount_kopecks(raw: str) -> Optional[int]:
+    """'5000' -> 500000, '1500,50' -> 150050. None if it is not a positive amount with <= 2 decimals."""
+    if not _AMOUNT_RE.match(raw or ""):
+        return None
+    kopecks = int(round(float(raw.replace(",", ".")) * 100))
+    return kopecks if kopecks > 0 else None
+
+
+def parse_transfer_args(args: str) -> Optional[tuple]:
+    """'/transfer Борис 5000 за обед' -> ('Борис', 500000, 'за обед'). None if malformed."""
+    parts = (args or "").split(maxsplit=2)
+    if len(parts) < 2:
+        return None
+    kopecks = parse_amount_kopecks(parts[1])
+    if kopecks is None:
+        return None
+    return parts[0], kopecks, (parts[2].strip() if len(parts) > 2 else "")
+
+
+def find_member_by_name(members: List[Dict[str, Any]], query: str, exclude_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Members whose name starts with the query (case-insensitive), without the sender."""
+    q = query.strip().lower()
+    return [
+        m for m in members
+        if m.get("id") != exclude_id and m.get("name", "").lower().startswith(q)
+    ]
+
+
+def format_money(kopecks: int) -> str:
+    return f"{kopecks / 100:,.2f}".replace(",", " ") + " ₽"
+
+
+TRANSFER_USAGE = (
+    "💸 *Перевод участнику:*\n"
+    "`/transfer Борис 5000` — вы дали Борису 5000 ₽ \\(долг или возврат долга\\)\n"
+    "`/transfer Борис 1500\\.50 за такси` — с комментарием\n"
+    "Посмотреть долги: /debts"
+)
+
+
+@dp.message(Command("transfer"))
+async def cmd_transfer(message: types.Message, state: FSMContext, command: CommandObject):
+    """Record that the sender gave money to another member. Repayment is just a reverse transfer."""
+    if not message.from_user:
+        return
+
+    parsed = parse_transfer_args(command.args or "")
+    if parsed is None:
+        await message.answer(TRANSFER_USAGE, parse_mode="MarkdownV2")
+        return
+    name_query, kopecks, comment = parsed
+
+    token, member_id, _ = await get_or_create_user_auth(message.from_user, state)
+    try:
+        members = await api_client.get_members(token)
+        matches = find_member_by_name(members, name_query, exclude_id=member_id)
+        if len(matches) != 1:
+            others = ", ".join(m["name"] for m in members if m.get("id") != member_id) or "других участников пока нет"
+            reason = "не найден" if not matches else "найдено несколько"
+            await message.answer(
+                escape_markdown_v2(f"Участник «{name_query}» {reason}. Доступны: {others}"),
+                parse_mode="MarkdownV2",
+            )
+            return
+        recipient = matches[0]
+
+        tx_res = await api_client.create_transaction(
+            token=token,
+            amount_kopecks=kopecks,
+            description=comment or f"Перевод: {recipient['name']}",
+            paid_by_member_id=member_id,
+            tx_type="transfer",
+            to_member_id=recipient["id"],
+            tx_date=date.today().isoformat(),
+        )
+        tx_id = tx_res.get("id", "")
+        await message.answer(
+            f"💸 *Перевод записан*\n\n"
+            f"Вы → {escape_markdown_v2(recipient['name'])}: *{escape_markdown_v2(format_money(kopecks))}*\n"
+            f"Долги: /debts",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="❌ Отменить", callback_data=f"tx_reject:{tx_id}")]]
+            ),
+        )
+    except Exception as exc:
+        logger.error("cmd_transfer failed: %s", exc)
+        await message.answer(
+            f"❌ Не удалось записать перевод: {escape_markdown_v2(str(exc))}", parse_mode="MarkdownV2"
+        )
+
+
+@dp.message(Command("debts"))
+async def cmd_debts(message: types.Message, state: FSMContext):
+    """Show who owes whom (derived only from transfers)."""
+    if not message.from_user:
+        return
+    token, _, _ = await get_or_create_user_auth(message.from_user, state)
+    try:
+        data = await api_client.get_settlements(token)
+        items = data.get("settlements", [])
+        if not items:
+            await message.answer("✅ Взаиморасчётов нет: никто никому не должен\\.", parse_mode="MarkdownV2")
+            return
+        lines = [
+            f"• {escape_markdown_v2(i['debtor_name'])} → {escape_markdown_v2(i['creditor_name'])}: "
+            f"*{escape_markdown_v2(format_money(i['amount_kopecks']))}*"
+            for i in items
+        ]
+        await message.answer("🤝 *Кто кому должен:*\n" + "\n".join(lines), parse_mode="MarkdownV2")
+    except Exception as exc:
+        logger.error("cmd_debts failed: %s", exc)
+        await message.answer(
+            f"❌ Не удалось получить долги: {escape_markdown_v2(str(exc))}", parse_mode="MarkdownV2"
+        )
+
+
+
 @dp.callback_query(F.data.startswith("tx_reject:"))
 async def callback_reject_transaction(callback: types.CallbackQuery, state: FSMContext):
     """Cancel a transaction that was just entered."""
@@ -291,7 +416,7 @@ async def handle_quick_entry(message: types.Message, state: FSMContext):
             tx_id = tx_res.get("id", "")
 
             await message.answer(
-                f"✅ *{type_label} успешно записан в PostgreSQL\\!*\n\n"
+                f"✅ *{type_label} успешно записан\\!*\n\n"
                 f"💰 *Сумма:* {safe_amount}\n"
                 f"📝 *Описание:* {safe_desc}\n"
                 f"👤 *Участник:* {user_name}\n"
@@ -340,6 +465,13 @@ async def main():
         bot_user = await bot.get_me()
         logger.info(f"✅ FinSync Telegram bot connected: @{bot_user.username} (ID: {bot_user.id})")
         logger.info(f"🚀 Connected to backend at: {BACKEND_API_URL}")
+
+        await bot.set_my_commands([
+            BotCommand(command="dashboard", description="Сводка и прогноз бюджета"),
+            BotCommand(command="transfer", description="Перевод участнику: /transfer Имя сумма"),
+            BotCommand(command="debts", description="Кто кому должен"),
+            BotCommand(command="start", description="Начать"),
+        ])
 
         # Set Telegram Chat Menu Button to open Mini App
         try:

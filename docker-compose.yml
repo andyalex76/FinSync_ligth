@@ -19,7 +19,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
     volumes:
       - pg_data:/var/lib/postgresql/data
-      - ./backend/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
     ports:
       - "127.0.0.1:5432:5432"
     healthcheck:

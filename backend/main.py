@@ -6,11 +6,8 @@ Features:
 - Real PostgreSQL CRUD operations with strict minor-units (kopecks) validation
 - Budgets (Plan / Fact) & End-of-month Forecast calculation
 """
-import base64
 import calendar
-import hashlib
 import hmac
-import json
 import logging
 import os
 import secrets
@@ -39,7 +36,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -78,39 +75,34 @@ except ImportError:
         return "127.0.0.1"
 
 try:
-    from backend.database import engine, get_session, init_db, to_uuid
+    from backend.database import engine, get_session, to_uuid
     from backend.models import (
-        Base,
         Budget,
         Category,
         Family,
         FamilyMember,
-        Fund,
-        RecurringRule,
-        ScheduledPayment,
         Tag,
         Transaction,
-        TransactionSplit,
         TransactionTag,
         User,
     )
 except ImportError:
-    from database import engine, get_session, init_db, to_uuid
+    from database import engine, get_session, to_uuid
     from models import (
-        Base,
         Budget,
         Category,
         Family,
         FamilyMember,
-        Fund,
-        RecurringRule,
-        ScheduledPayment,
         Tag,
         Transaction,
-        TransactionSplit,
         TransactionTag,
         User,
     )
+
+try:
+    from backend.settlements import compute_balances, compute_settlements
+except ImportError:
+    from settlements import compute_balances, compute_settlements
 
 try:
     from backend.auth import (
@@ -218,10 +210,9 @@ logger = StructuredLogger(_raw_logger)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Validate secrets and prepare database tables on startup."""
+    """Validate secrets on startup. The schema is created by Alembic (entrypoint.sh), never by the app."""
     # Refuse to start with missing/placeholder secrets or an empty Telegram allowlist.
     validate_runtime_config()
-    await init_db()
     yield
 
 
@@ -334,9 +325,18 @@ class TransactionCreate(BaseModel):
     currency: str = Field(default="RUB", pattern="^(RUB|USD|EUR)$")
     category_id: Optional[str] = None
     paid_by_member_id: Optional[str] = None
+    to_member_id: Optional[str] = Field(default=None, description="Recipient of a transfer (type='transfer')")
     description: str
     transaction_date: str = Field(..., description="YYYY-MM-DD")
     tags: List[str] = []
+
+    @model_validator(mode="after")
+    def _transfer_needs_recipient(self):
+        if self.type == "transfer" and not self.to_member_id:
+            raise ValueError("Для перевода нужен получатель (to_member_id)")
+        if self.type != "transfer" and self.to_member_id:
+            raise ValueError("to_member_id допустим только для перевода")
+        return self
 
 
 class BatchSyncItem(BaseModel):
@@ -347,6 +347,7 @@ class BatchSyncItem(BaseModel):
     currency: str = "RUB"
     category_id: Optional[str] = None
     paid_by_member_id: str
+    to_member_id: Optional[str] = None
     description: str
     transaction_date: str
     tags: List[str] = []
@@ -368,75 +369,36 @@ class BudgetSetRequest(BaseModel):
 # ---------------------------------------------------------------------
 # Helper: Ensure Default Seed Data in PostgreSQL
 # ---------------------------------------------------------------------
-async def get_or_create_default_family(session: AsyncSession) -> Family:
+async def get_or_create_default_family(
+    session: AsyncSession,
+    creator: Optional[User] = None,
+) -> Family:
     """
-    Retrieves the primary active family workspace from PostgreSQL.
-    If database is empty, seeds the default initial family workspace with
-    members, standard categories, current month budgets, and initial demo data.
-    """
-    stmt = select(Family).limit(1)
-    result = await session.execute(stmt)
-    family = result.scalar_one_or_none()
+    Return the family workspace. There is exactly one family per installation.
 
+    On a brand-new database the first authenticated (allowlisted) user creates it: the family gets
+    standard categories, this month's default budgets and starter tags. No demo members, users or
+    transactions are created. Without `creator` and without a family the request is refused:
+    nobody has logged in yet (open the bot with /start first).
+    """
+    family = (await session.execute(select(Family).limit(1))).scalar_one_or_none()
     if family is not None:
         return family
 
-    # Seed Default User
-    default_user = User(
-        id=to_uuid("usr-01"),
-        telegram_id=-1,  # demo user: must never collide with a real Telegram ID
-        username="alex_smirnov",
-        first_name="Алексей",
-        last_name="Смирнов",
-        language_code="ru",
-    )
-    session.add(default_user)
-    await session.flush()
+    if creator is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Семья ещё не создана: откройте бота и отправьте /start",
+        )
 
-    # Seed Default Family
     family = Family(
         id=to_uuid("fam-01"),
-        name="Семья Смирновых",
+        name="Семья",
         base_currency="RUB",
-        invite_code=f"FIN-{secrets.token_hex(4).upper()}",  # random: a public constant would be guessable
-        created_by_user_id=default_user.id,
+        invite_code=f"FIN-{secrets.token_hex(4).upper()}",
+        created_by_user_id=creator.id,
     )
     session.add(family)
-    await session.flush()
-
-    # Seed 3 Family Members (max 5)
-    member_alex = FamilyMember(
-        id=to_uuid("mem-01"),
-        family_id=family.id,
-        user_id=default_user.id,
-        role="owner",
-        display_name="Алексей (Вы)",
-        avatar_emoji="👨‍💼",
-    )
-    user_elena = User(id=to_uuid("usr-02"), first_name="Елена", language_code="ru")
-    session.add(user_elena)
-    await session.flush()
-    member_elena = FamilyMember(
-        id=to_uuid("mem-02"),
-        family_id=family.id,
-        user_id=user_elena.id,
-        role="admin",
-        display_name="Елена",
-        avatar_emoji="👩‍⚕️",
-    )
-
-    user_mikhail = User(id=to_uuid("usr-03"), first_name="Михаил", language_code="ru")
-    session.add(user_mikhail)
-    await session.flush()
-    member_mikhail = FamilyMember(
-        id=to_uuid("mem-03"),
-        family_id=family.id,
-        user_id=user_mikhail.id,
-        role="member",
-        display_name="Михаил (Сын)",
-        avatar_emoji="🧑‍🎓",
-    )
-    session.add_all([member_alex, member_elena, member_mikhail])
     await session.flush()
 
     # Seed Standard Categories
@@ -483,48 +445,6 @@ async def get_or_create_default_family(session: AsyncSession) -> Family:
     # Seed Default Tags
     for tag_name in ["супермаркет", "кафе", "аптека", "жкх", "бензин"]:
         session.add(Tag(family_id=family.id, name=tag_name))
-
-    # Seed Sample Initial Transactions in PostgreSQL
-    today = date.today()
-    sample_txs = [
-        ("ВкусВилл — Продукты на неделю", "cat-groceries", 1245000, "mem-01", "expense", today),
-        ("Мосэнергосбыт — Электроэнергия", "cat-housing", 1120000, "mem-01", "expense", today),
-        ("АЗС Лукойл — АИ-95", "cat-auto", 670000, "mem-02", "expense", today),
-        ("Додо Пицца — Семейный ужин", "cat-cafes", 840000, "mem-02", "expense", today),
-        ("Аптека Ригла — Витамины", "cat-health", 240000, "mem-03", "expense", today),
-        ("Аванс — Основная работа", "cat-salary", 14500000, "mem-01", "income", today),
-    ]
-
-    members_list = [member_alex, member_elena, member_mikhail]
-    for desc, cat_slug, amount, payer_slug, t_type, t_date in sample_txs:
-        payer_id = to_uuid(payer_slug)
-        tx = Transaction(
-            family_id=family.id,
-            paid_by_member_id=payer_id,
-            category_id=to_uuid(cat_slug),
-            type=t_type,
-            amount_kopecks=amount,
-            currency="RUB",
-            description=desc,
-            transaction_date=t_date,
-            status="confirmed",
-        )
-        session.add(tx)
-        await session.flush()
-
-        # Split expenses equally across members
-        if t_type == "expense":
-            split_amount = amount // len(members_list)
-            rem = amount % len(members_list)
-            for idx, m in enumerate(members_list):
-                share = split_amount + (rem if idx == 0 else 0)
-                session.add(
-                    TransactionSplit(
-                        transaction_id=tx.id,
-                        member_id=m.id,
-                        share_kopecks=share,
-                    )
-                )
 
     await session.flush()
     return family
@@ -654,7 +574,7 @@ async def exchange_login_code(
     user = (await session.execute(select(User).where(User.telegram_id == telegram_id))).scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Сначала откройте бота командой /start")
-    family = await get_or_create_default_family(session)
+    family = await get_or_create_default_family(session, creator=user)
     membership = (await session.execute(
         select(FamilyMember).where(FamilyMember.family_id == family.id, FamilyMember.user_id == user.id)
     )).scalar_one_or_none()
@@ -704,7 +624,7 @@ async def auth_telegram(
             user.avatar_url = payload.avatar_url
         await session.flush()
 
-    family = await get_or_create_default_family(session)
+    family = await get_or_create_default_family(session, creator=user)
 
     # Check if membership already exists
     mem_stmt = select(FamilyMember).where(
@@ -723,7 +643,7 @@ async def auth_telegram(
             membership = FamilyMember(
                 family_id=family.id,
                 user_id=user.id,
-                role="member",
+                role="owner" if current_count == 0 else "member",
                 display_name=payload.first_name or payload.username or "Участник",
                 avatar_emoji="👤",
             )
@@ -786,6 +706,19 @@ async def get_current_family(
     }
 
 
+async def _transfer_rows(session: AsyncSession, family: Family) -> List[tuple]:
+    """All live transfers of the family as (giver_id, receiver_id, amount_kopecks)."""
+    stmt = select(
+        Transaction.paid_by_member_id, Transaction.to_member_id, Transaction.amount_kopecks
+    ).where(
+        Transaction.family_id == family.id,
+        Transaction.type == "transfer",
+        Transaction.status != "rejected",
+        Transaction.to_member_id.is_not(None),
+    )
+    return [(str(a), str(b), int(amount)) for a, b, amount in (await session.execute(stmt)).all()]
+
+
 @app.get("/api/family/members", tags=["Family"])
 @limiter.limit("60/minute")
 async def get_family_members(
@@ -794,8 +727,8 @@ async def get_family_members(
     token_data: Dict[str, Any] = Depends(verify_token),
 ):
     """
-    List all participants with calculated balances (who owes whom) directly from PostgreSQL.
-    Formula: Paid by member minus their split obligations.
+    Active participants with their balance from transfers:
+    positive balance_kopecks = others owe this member, negative = this member owes others.
     """
     family = await get_or_create_default_family(session)
 
@@ -804,42 +737,43 @@ async def get_family_members(
         FamilyMember.is_active.is_(True),
     ).order_by(FamilyMember.created_at)
     members = (await session.execute(stmt)).scalars().all()
+    balances = compute_balances(await _transfer_rows(session, family))
 
-    members_response = []
-    for member in members:
-        # Sum paid by member
-        paid_stmt = select(func.coalesce(func.sum(Transaction.amount_kopecks), 0)).where(
-            Transaction.family_id == family.id,
-            Transaction.paid_by_member_id == member.id,
-            Transaction.type == "expense",
-            Transaction.status != "rejected",
-        )
-        total_paid = (await session.execute(paid_stmt)).scalar_one()
-
-        # Sum member share in splits
-        split_stmt = (
-            select(func.coalesce(func.sum(TransactionSplit.share_kopecks), 0))
-            .join(Transaction, Transaction.id == TransactionSplit.transaction_id)
-            .where(
-                Transaction.family_id == family.id,
-                TransactionSplit.member_id == member.id,
-                Transaction.status != "rejected",
-            )
-        )
-        total_split = (await session.execute(split_stmt)).scalar_one()
-
-        balance_kopecks = total_paid - total_split
-
-        members_response.append({
+    return [
+        {
             "id": str(member.id),
             "name": member.display_name,
             "avatar": member.avatar_emoji,
             "role": member.role,
-            "balance_kopecks": balance_kopecks,
+            "balance_kopecks": balances.get(str(member.id), 0),
             "is_active": member.is_active,
-        })
+        }
+        for member in members
+    ]
 
-    return members_response
+
+@app.get("/api/family/settlements", tags=["Family"])
+@limiter.limit("60/minute")
+async def get_family_settlements(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    token_data: Dict[str, Any] = Depends(verify_token),
+):
+    """Open debts between members, derived only from transfers (who owes whom how much)."""
+    family = await get_or_create_default_family(session)
+    members = (await session.execute(
+        select(FamilyMember).where(FamilyMember.family_id == family.id)
+    )).scalars().all()
+    names = {str(m.id): m.display_name for m in members}
+
+    items = []
+    for debt in compute_settlements(await _transfer_rows(session, family)):
+        items.append({
+            **debt,
+            "debtor_name": names.get(str(debt["debtor_member_id"]), "?"),
+            "creditor_name": names.get(str(debt["creditor_member_id"]), "?"),
+        })
+    return {"count": len(items), "settlements": items}
 
 
 @app.post("/api/family/setup", tags=["Family"])
@@ -1159,6 +1093,63 @@ async def set_category_budget(
 # ---------------------------------------------------------------------
 # 4. TRANSACTIONS CRUD (Real PostgreSQL with minor units)
 # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Resolution helpers: the server, not the client, decides who a transaction belongs to
+# ---------------------------------------------------------------------
+async def _find_member(
+    session: AsyncSession, family: Family, supplied: Optional[str]
+) -> Optional[FamilyMember]:
+    """An active member of this family with the given id, or None (unknown ids are never trusted)."""
+    if not supplied:
+        return None
+    stmt = select(FamilyMember).where(
+        FamilyMember.id == to_uuid(supplied),
+        FamilyMember.family_id == family.id,
+        FamilyMember.is_active.is_(True),
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _resolve_payer(
+    session: AsyncSession,
+    family: Family,
+    supplied: Optional[str],
+    token_data: Dict[str, Any],
+) -> FamilyMember:
+    """
+    Payer = the member the client names (if it really exists), otherwise the member of the
+    authenticated user. This also keeps old clients that still send demo ids ('mem-01') working.
+    """
+    member = await _find_member(session, family, supplied)
+    if member is None:
+        member = await _find_member(session, family, token_data.get("member_id"))
+    if member is None and token_data.get("user_id"):
+        stmt = select(FamilyMember).where(
+            FamilyMember.family_id == family.id,
+            FamilyMember.user_id == to_uuid(token_data["user_id"]),
+            FamilyMember.is_active.is_(True),
+        )
+        member = (await session.execute(stmt)).scalar_one_or_none()
+    if member is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Вы не состоите в семье: отправьте /start боту",
+        )
+    return member
+
+
+async def _existing_category_id(
+    session: AsyncSession, family: Family, supplied: Optional[str]
+) -> Optional[uuid.UUID]:
+    """The id only if such a category exists in this family (otherwise None instead of an FK error)."""
+    if not supplied:
+        return None
+    cat = (await session.execute(
+        select(Category.id).where(Category.id == to_uuid(supplied), Category.family_id == family.id)
+    )).scalar_one_or_none()
+    return cat
+
+
 @app.get("/api/transactions", tags=["Transactions"])
 @limiter.limit("60/minute")
 async def list_transactions(
@@ -1175,7 +1166,7 @@ async def list_transactions(
 
     stmt = (
         select(Transaction)
-        .options(selectinload(Transaction.tags), selectinload(Transaction.splits))
+        .options(selectinload(Transaction.tags))
         .where(Transaction.family_id == family.id)
     )
 
@@ -1202,6 +1193,7 @@ async def list_transactions(
             "currency": t.currency,
             "category_id": str(t.category_id) if t.category_id else None,
             "paid_by_member_id": str(t.paid_by_member_id),
+            "to_member_id": str(t.to_member_id) if t.to_member_id else None,
             "description": t.description,
             "transaction_date": t.transaction_date.isoformat(),
             "status": t.status,
@@ -1223,38 +1215,23 @@ async def create_transaction(
     token_data: Dict[str, Any] = Depends(verify_token),
 ):
     """
-    Create a transaction in PostgreSQL with strict minor-units (kopecks) validation and automatic splits.
+    Create a transaction in PostgreSQL (amounts in kopecks).
+    type='transfer' means the payer gave money to `to_member_id` (a loan or a repayment).
     """
     family = await get_or_create_default_family(session)
-    paid_by_uuid = None
-    if payload.paid_by_member_id:
-        paid_by_uuid = to_uuid(payload.paid_by_member_id)
-    elif token_data.get("member_id"):
-        paid_by_uuid = to_uuid(token_data.get("member_id"))
-    else:
-        user_id_str = token_data.get("user_id")
-        if user_id_str:
-            mem = (await session.execute(
-                select(FamilyMember).where(
-                    FamilyMember.family_id == family.id,
-                    FamilyMember.user_id == to_uuid(user_id_str),
-                )
-            )).scalar_one_or_none()
-            if mem:
-                paid_by_uuid = mem.id
-        if not paid_by_uuid:
-            first_mem = (await session.execute(
-                select(FamilyMember).where(
-                    FamilyMember.family_id == family.id,
-                    FamilyMember.is_active.is_(True),
-                ).order_by(FamilyMember.created_at)
-            )).scalars().first()
-            if first_mem:
-                paid_by_uuid = first_mem.id
-            else:
-                paid_by_uuid = to_uuid("mem-01")
+    payer = await _resolve_payer(session, family, payload.paid_by_member_id, token_data)
 
-    cat_uuid = to_uuid(payload.category_id) if payload.category_id else None
+    recipient = None
+    if payload.type == "transfer":
+        recipient = await _find_member(session, family, payload.to_member_id)
+        if recipient is None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Получатель перевода не найден")
+        if recipient.id == payer.id:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Нельзя переводить самому себе")
+
+    cat_uuid = None
+    if payload.type != "transfer":
+        cat_uuid = await _existing_category_id(session, family, payload.category_id)
     if not cat_uuid and payload.type == "expense":
         desc_lower = payload.description.lower()
         cat_stmt = select(Category).where(Category.family_id == family.id)
@@ -1293,7 +1270,8 @@ async def create_transaction(
 
     tx = Transaction(
         family_id=family.id,
-        paid_by_member_id=paid_by_uuid,
+        paid_by_member_id=payer.id,
+        to_member_id=recipient.id if recipient else None,
         category_id=cat_uuid,
         type=payload.type,
         amount_kopecks=payload.amount_kopecks,
@@ -1316,31 +1294,18 @@ async def create_transaction(
                     await session.flush()
                 tx.tags.append(tag_obj)
 
-    # Default splits among active family members for expenses
-    if payload.type == "expense":
-        mem_stmt = select(FamilyMember).where(
-            FamilyMember.family_id == family.id,
-            FamilyMember.is_active.is_(True),
-        )
-        active_members = (await session.execute(mem_stmt)).scalars().all()
-        if active_members:
-            per_share = payload.amount_kopecks // len(active_members)
-            remainder = payload.amount_kopecks % len(active_members)
-            for idx, m in enumerate(active_members):
-                share = per_share + (remainder if idx == 0 else 0)
-                tx.splits.append(TransactionSplit(member_id=m.id, share_kopecks=share))
-    else:
-        tx.splits.append(TransactionSplit(member_id=paid_by_uuid, share_kopecks=payload.amount_kopecks))
-
     session.add(tx)
     await session.flush()
 
     return {
         "id": str(tx.id),
+        "type": tx.type,
         "status": tx.status,
         "amount_kopecks": tx.amount_kopecks,
         "currency": tx.currency,
         "category_id": str(tx.category_id) if tx.category_id else None,
+        "paid_by_member_id": str(tx.paid_by_member_id),
+        "to_member_id": str(tx.to_member_id) if tx.to_member_id else None,
         "description": tx.description,
         "transaction_date": tx.transaction_date.isoformat(),
         "created_at": tx.created_at.isoformat(),
@@ -1356,8 +1321,8 @@ async def batch_sync_transactions(
     token_data: Dict[str, Any] = Depends(verify_token),
 ):
     """
-    Background Sync endpoint: process locally buffered offline transactions pushed by the PWA.
-    Performs real PostgreSQL upserts and deletions.
+    Batch endpoint used by the current web client to push locally buffered transactions.
+    Payer and category are validated against the database; unknown ids never cause an FK error.
     """
     family = await get_or_create_default_family(session)
     synced_ids = []
@@ -1366,45 +1331,62 @@ async def batch_sync_transactions(
         item_uuid = to_uuid(item.id)
 
         if item.action == "delete":
-            del_stmt = delete(Transaction).where(Transaction.id == item_uuid)
-            await session.execute(del_stmt)
+            await session.execute(delete(TransactionTag).where(TransactionTag.transaction_id == item_uuid))
+            await session.execute(
+                delete(Transaction).where(Transaction.id == item_uuid, Transaction.family_id == family.id)
+            )
             synced_ids.append(item.id)
 
         elif item.action == "update":
-            stmt = select(Transaction).where(Transaction.id == item_uuid)
+            stmt = select(Transaction).where(Transaction.id == item_uuid, Transaction.family_id == family.id)
             existing = (await session.execute(stmt)).scalar_one_or_none()
             if existing:
                 existing.amount_kopecks = item.amount_kopecks
                 existing.description = item.description
-                existing.type = item.type
-                if item.category_id:
-                    existing.category_id = to_uuid(item.category_id)
+                # Transfer-ness (and its recipient) is fixed at creation.
+                if item.type != "transfer" and existing.type != "transfer":
+                    existing.type = item.type
+                if existing.type != "transfer":
+                    cat_id = await _existing_category_id(session, family, item.category_id)
+                    if cat_id:
+                        existing.category_id = cat_id
                 if item.transaction_date:
-                    existing.transaction_date = date.fromisoformat(item.transaction_date)
+                    try:
+                        existing.transaction_date = date.fromisoformat(item.transaction_date)
+                    except ValueError:
+                        pass
             synced_ids.append(item.id)
 
         else:  # create
-            stmt = select(Transaction).where(Transaction.id == item_uuid)
-            existing = (await session.execute(stmt)).scalar_one_or_none()
+            existing = (await session.execute(select(Transaction).where(Transaction.id == item_uuid))).scalar_one_or_none()
             if not existing:
+                payer = await _resolve_payer(session, family, item.paid_by_member_id, token_data)
+                recipient = None
+                if item.type == "transfer":
+                    recipient = await _find_member(session, family, item.to_member_id)
+                    if recipient is None or recipient.id == payer.id:
+                        logger.warning("sync_skipped_invalid_transfer", item_id=item.id)
+                        synced_ids.append(item.id)  # drop it from the client queue instead of retrying forever
+                        continue
+
                 try:
                     tx_date = date.fromisoformat(item.transaction_date)
                 except ValueError:
                     tx_date = date.today()
 
-                tx = Transaction(
+                session.add(Transaction(
                     id=item_uuid,
                     family_id=family.id,
-                    paid_by_member_id=to_uuid(item.paid_by_member_id),
-                    category_id=to_uuid(item.category_id) if item.category_id else None,
+                    paid_by_member_id=payer.id,
+                    to_member_id=recipient.id if recipient else None,
+                    category_id=None if recipient else await _existing_category_id(session, family, item.category_id),
                     type=item.type,
                     amount_kopecks=item.amount_kopecks,
                     currency=item.currency,
                     description=item.description,
                     transaction_date=tx_date,
                     status="confirmed",
-                )
-                session.add(tx)
+                ))
             synced_ids.append(item.id)
 
     await session.flush()
@@ -1533,12 +1515,10 @@ async def get_expense_forecast(
         Budget.month_period == month_str,
     )
     total_budget_kopecks = (await session.execute(budget_stmt)).scalar_one()
-    if total_budget_kopecks == 0:
-        total_budget_kopecks = 12800000
-
     daily_burn_kopecks = actual_spent_kopecks // days_passed
     projected_spent_kopecks = daily_burn_kopecks * total_days
-    variance_kopecks = projected_spent_kopecks - total_budget_kopecks
+    # Without any configured budget there is nothing to compare with: no invented default limit.
+    variance_kopecks = projected_spent_kopecks - total_budget_kopecks if total_budget_kopecks > 0 else 0
 
     return {
         "current_month": month_str,
@@ -1550,7 +1530,8 @@ async def get_expense_forecast(
         "projected_spent_kopecks": projected_spent_kopecks,
         "total_budget_kopecks": total_budget_kopecks,
         "variance_kopecks": variance_kopecks,
-        "is_over_budget": variance_kopecks > 0,
+        "is_over_budget": total_budget_kopecks > 0 and variance_kopecks > 0,
+        "has_budget": total_budget_kopecks > 0,
     }
 
 
@@ -1636,39 +1617,20 @@ async def reset_database_and_cache(
     token_data: Dict[str, Any] = Depends(verify_token),
 ):
     """
-    Reset PostgreSQL database tables.
+    Delete all transactions (and their tag links). Family, members, categories and budgets stay.
     Protected endpoint: requires administrative authentication.
-    mode:
-      - 'clean': wipe transactions for clean manual testing.
-      - 'demo': reset to initial demo seeds.
     """
-    mode = payload.mode if payload and payload.mode else "clean"
+    mode = "clean"
 
-    # Delete relational rows in order respecting FK constraints
-    await session.execute(delete(TransactionSplit))
     await session.execute(delete(TransactionTag))
     await session.execute(delete(Transaction))
-
-    if mode == "demo":
-        await session.execute(delete(Budget))
-        await session.execute(delete(Category))
-        await session.execute(delete(Tag))
-        await session.execute(delete(FamilyMember))
-        await session.execute(delete(Family))
-        await session.flush()
-        await get_or_create_default_family(session)
-
     await session.flush()
 
     return {
         "status": "success",
         "mode": mode,
-        "message": "Данные PostgreSQL успешно сброшены",
-        "tables_cleared": [
-            "transactions",
-            "transaction_splits",
-            "transaction_tags",
-        ],
+        "message": "Операции удалены",
+        "tables_cleared": ["transactions", "transaction_tags"],
         "reset_at": datetime.utcnow().isoformat(),
         "authorized_by": admin.get("sub", "admin"),
     }
