@@ -4,13 +4,12 @@ Database connection, session management and engine configuration for SQLAlchemy 
 import logging
 import os
 import uuid
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from backend.models import Base
 
 logger = logging.getLogger("family_budget.database")
 
@@ -82,16 +81,3 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
-async def init_db():
-    """
-    Check and create all database tables according to SQLAlchemy metadata.
-    """
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database tables initialized successfully via SQLAlchemy Async.")
-    except Exception as exc:
-        logger.warning(
-            f"Database connection not available at startup ({exc}). "
-            f"Tables will be created once database server is reachable."
-        )

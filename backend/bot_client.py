@@ -114,9 +114,11 @@ class BotAPIClient:
         tx_type: str = "expense",
         tx_date: Optional[str] = None,
         tags: Optional[List[str]] = None,
+        to_member_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Record a transaction in PostgreSQL with minor units (kopecks) and auto-splits.
+        Record a transaction in PostgreSQL (amount in kopecks).
+        tx_type='transfer' requires to_member_id: the payer gives money to that member.
         """
         session = await self.get_session()
         url = f"{self.base_url}/api/transactions"
@@ -125,11 +127,13 @@ class BotAPIClient:
             "amount_kopecks": amount_kopecks,
             "currency": "RUB",
             "category_id": category_id,
-            "paid_by_member_id": paid_by_member_id or "mem-01",
+            "paid_by_member_id": paid_by_member_id,  # None = the authenticated member (decided by the API)
             "description": description,
             "transaction_date": tx_date or "",
             "tags": tags or [],
         }
+        if to_member_id:
+            payload["to_member_id"] = to_member_id
         headers = self._auth_headers(token)
         headers["Content-Type"] = "application/json"
 
@@ -170,3 +174,19 @@ class BotAPIClient:
                 data = await resp.json()
                 return data.get("items", [])
             return []
+
+    async def get_members(self, token: str) -> List[Dict[str, Any]]:
+        """Active family members with their transfer balances."""
+        session = await self.get_session()
+        async with session.get(f"{self.base_url}/api/family/members", headers=self._auth_headers(token)) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"Failed to load members: HTTP {resp.status}")
+            return await resp.json()
+
+    async def get_settlements(self, token: str) -> Dict[str, Any]:
+        """Open debts between members (derived from transfers)."""
+        session = await self.get_session()
+        async with session.get(f"{self.base_url}/api/family/settlements", headers=self._auth_headers(token)) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"Failed to load settlements: HTTP {resp.status}")
+            return await resp.json()

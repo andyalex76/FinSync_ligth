@@ -4,7 +4,7 @@ Uses pytest and httpx to test authentication, validation, and route contracts.
 Compatible with pytest runner (VPS / Docker) and standard python environment.
 """
 from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 try:
     import pytest
@@ -43,7 +43,7 @@ except ImportError:
 try:
     from backend.auth import create_access_token, decode_access_token, verify_token
 except ImportError:
-    from auth import create_access_token, decode_access_token, verify_token
+    from auth import create_access_token, decode_access_token
 
 
 @pytest.fixture
@@ -321,5 +321,4 @@ if __name__ == "__main__":
     test_jwt_token_tampered_fails()
     test_structured_logger_kwargs()
     test_admin_token_backdoors_rejected()
-    test_verify_internal_key_logic()
     print("All auth, backdoor protection, and logging unit smoke tests passed successfully!")

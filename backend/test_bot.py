@@ -6,7 +6,6 @@ Validates:
 - Inline keyboard generation
 - Auth & token management
 """
-import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 try:
@@ -210,3 +209,111 @@ async def test_start_without_membership_does_not_wait_for_invite_code():
 
     assert "код приглашения" not in message.answer.call_args.args[0].lower()
     assert await state.get_state() is None
+
+
+# ---------------------------------------------------------------------------
+# /transfer and /debts
+# ---------------------------------------------------------------------------
+def test_parse_amount_kopecks():
+    from backend.bot import parse_amount_kopecks
+
+    assert parse_amount_kopecks("5000") == 500000
+    assert parse_amount_kopecks("1500,50") == 150050
+    assert parse_amount_kopecks("1500.5") == 150050
+    for bad in ("0", "-5", "12.345", "abc", "", "1 000"):
+        assert parse_amount_kopecks(bad) is None, bad
+
+
+def test_parse_transfer_args():
+    from backend.bot import parse_transfer_args
+
+    assert parse_transfer_args("Борис 5000") == ("Борис", 500000, "")
+    assert parse_transfer_args("Борис 1500,50 за такси и кофе") == ("Борис", 150050, "за такси и кофе")
+    assert parse_transfer_args("Борис") is None
+    assert parse_transfer_args("Борис много") is None
+    assert parse_transfer_args("") is None
+
+
+def test_find_member_by_name_ignores_sender_and_case():
+    from backend.bot import find_member_by_name
+
+    members = [
+        {"id": "1", "name": "Анна"},
+        {"id": "2", "name": "Борис"},
+        {"id": "3", "name": "Борислав"},
+    ]
+    assert [m["id"] for m in find_member_by_name(members, "бор")] == ["2", "3"]
+    assert [m["id"] for m in find_member_by_name(members, "Борис")] == ["2", "3"]
+    assert find_member_by_name(members, "Анна", exclude_id="1") == []
+
+
+def _command(args):
+    command = MagicMock()
+    command.args = args
+    return command
+
+
+@pytest.mark.asyncio
+async def test_transfer_command_records_a_transfer_to_the_named_member():
+    from backend import bot as bot_module
+
+    state = _fsm_context()
+    message = _fake_message("/transfer Борис 5000 за обед")
+    members = [{"id": "m-anna", "name": "Анна"}, {"id": "m-boris", "name": "Борис"}]
+    auth_reply = {"access_token": "jwt", "user": {"member_id": "m-anna", "family_id": "f"}}
+    create = AsyncMock(return_value={"id": "tx-1"})
+
+    with patch.object(bot_module.api_client, "auth_telegram", AsyncMock(return_value=auth_reply)), \
+         patch.object(bot_module.api_client, "get_members", AsyncMock(return_value=members)), \
+         patch.object(bot_module.api_client, "create_transaction", create):
+        await bot_module.cmd_transfer(message, state, _command("Борис 5000 за обед"))
+
+    kwargs = create.call_args.kwargs
+    assert kwargs["tx_type"] == "transfer"
+    assert kwargs["to_member_id"] == "m-boris"
+    assert kwargs["amount_kopecks"] == 500000
+    assert kwargs["paid_by_member_id"] == "m-anna"
+    assert kwargs["description"] == "за обед"
+
+
+@pytest.mark.asyncio
+async def test_transfer_command_refuses_unknown_or_malformed_input():
+    from backend import bot as bot_module
+
+    state = _fsm_context()
+    members = [{"id": "m-anna", "name": "Анна"}, {"id": "m-boris", "name": "Борис"}]
+    auth_reply = {"access_token": "jwt", "user": {"member_id": "m-anna", "family_id": "f"}}
+    create = AsyncMock()
+
+    with patch.object(bot_module.api_client, "auth_telegram", AsyncMock(return_value=auth_reply)), \
+         patch.object(bot_module.api_client, "get_members", AsyncMock(return_value=members)), \
+         patch.object(bot_module.api_client, "create_transaction", create):
+        unknown = _fake_message("/transfer Вася 100")
+        await bot_module.cmd_transfer(unknown, state, _command("Вася 100"))
+        malformed = _fake_message("/transfer Борис")
+        await bot_module.cmd_transfer(malformed, state, _command("Борис"))
+        to_self = _fake_message("/transfer Анна 100")
+        await bot_module.cmd_transfer(to_self, state, _command("Анна 100"))
+
+    create.assert_not_called()
+    assert "не найден" in unknown.answer.call_args.args[0]
+    assert "/transfer" in malformed.answer.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_debts_command_lists_who_owes_whom():
+    from backend import bot as bot_module
+
+    state = _fsm_context()
+    message = _fake_message("/debts")
+    auth_reply = {"access_token": "jwt", "user": {"member_id": "m-anna", "family_id": "f"}}
+    data = {"count": 1, "settlements": [
+        {"debtor_name": "Борис", "creditor_name": "Анна", "amount_kopecks": 300000},
+    ]}
+
+    with patch.object(bot_module.api_client, "auth_telegram", AsyncMock(return_value=auth_reply)), \
+         patch.object(bot_module.api_client, "get_settlements", AsyncMock(return_value=data)):
+        await bot_module.cmd_debts(message, state)
+
+    text = message.answer.call_args.args[0]
+    assert "Борис" in text and "Анна" in text and "3 000" in text
