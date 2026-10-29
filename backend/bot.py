@@ -141,6 +141,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
             f"• Введите `650 Обед` для быстрой записи расхода в базу\n"
             f"• `\\+50000 Зарплата` — доход\n"
             f"• `/transfer Борис 5000` — перевод участнику, /debts — кто кому должен\n"
+            f"• /goals — копилки, `/save 5000 Отпуск` — пополнить\n"
             f"• Отправьте /dashboard для проверки баланса и прогноза",
             parse_mode="MarkdownV2",
         )
@@ -344,6 +345,201 @@ async def cmd_debts(message: types.Message, state: FSMContext):
 
 
 
+# ---------------------------------------------------------------------------
+# Savings goals (/goal, /save, /withdraw, /goals): amount first, then the goal name
+# ---------------------------------------------------------------------------
+_DEADLINE_RE = re.compile(r"\s+до\s+(\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4})\s*$", re.IGNORECASE)
+
+
+def parse_deadline(raw: str) -> Optional[str]:
+    """'2027-06-30' or '30.06.2027' -> '2027-06-30'. None if it is not a real date."""
+    try:
+        if "." in raw:
+            day, month, year = raw.split(".")
+            return date(int(year), int(month), int(day)).isoformat()
+        return date.fromisoformat(raw).isoformat()
+    except ValueError:
+        return None
+
+
+def parse_goal_args(args: str) -> Optional[tuple]:
+    """'150000 Отпуск на море до 30.06.2027' -> (15000000, 'Отпуск на море', '2027-06-30')."""
+    text = (args or "").strip()
+    deadline = None
+    match = _DEADLINE_RE.search(text)
+    if match:
+        deadline = parse_deadline(match.group(1))
+        if deadline is None:
+            return None
+        text = text[: match.start()].strip()
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    kopecks = parse_amount_kopecks(parts[0])
+    if kopecks is None:
+        return None
+    return kopecks, parts[1].strip(), deadline
+
+
+def parse_savings_args(args: str) -> Optional[tuple]:
+    """'5000 Отпуск' -> (500000, 'Отпуск'); '5000' -> (500000, '') (allowed when there is one goal)."""
+    parts = (args or "").strip().split(maxsplit=1)
+    if not parts:
+        return None
+    kopecks = parse_amount_kopecks(parts[0])
+    if kopecks is None:
+        return None
+    return kopecks, (parts[1].strip() if len(parts) > 1 else "")
+
+
+def find_goals_by_name(goals: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    """Exact name wins, then prefix, then substring (case-insensitive). Empty query = the only goal."""
+    q = query.strip().casefold()
+    if not q:
+        return goals if len(goals) == 1 else []
+    for matcher in (
+        lambda n: n == q,
+        lambda n: n.startswith(q),
+        lambda n: q in n,
+    ):
+        found = [g for g in goals if matcher(g.get("name", "").casefold())]
+        if found:
+            return found
+    return []
+
+
+def format_goal_line(goal: Dict[str, Any]) -> str:
+    """Plain-text line for a goal (escaped by the caller)."""
+    line = (
+        f"{goal['name']}: {format_money(goal['saved_kopecks'])} из {format_money(goal['target_amount_kopecks'])} "
+        f"({goal['progress_percent']}%)"
+    )
+    if goal.get("is_reached"):
+        line += " ✅ цель достигнута"
+    elif goal.get("target_date"):
+        if goal.get("is_overdue"):
+            line += f", срок {goal['target_date']} прошёл"
+        else:
+            line += f", до {goal['target_date']}"
+            if goal.get("required_per_month_kopecks"):
+                line += f", нужно ~{format_money(goal['required_per_month_kopecks'])}/мес"
+    return line
+
+
+GOALS_USAGE = (
+    "🎯 *Копилки:*\n"
+    "`/goal 150000 Отпуск до 30\\.06\\.2027` — создать цель \\(срок необязателен\\)\n"
+    "`/save 5000 Отпуск` — пополнить\n"
+    "`/withdraw 2000 Отпуск` — снять\n"
+    "/goals — прогресс всех копилок\n"
+    "Если копилка одна, название можно не указывать\\."
+)
+
+
+@dp.message(Command("goal"))
+async def cmd_goal(message: types.Message, state: FSMContext, command: CommandObject):
+    if not message.from_user:
+        return
+    parsed = parse_goal_args(command.args or "")
+    if parsed is None:
+        await message.answer(GOALS_USAGE, parse_mode="MarkdownV2")
+        return
+    kopecks, name, deadline = parsed
+
+    token, _, _ = await get_or_create_user_auth(message.from_user, state)
+    try:
+        goal = await api_client.create_goal(token, name, kopecks, deadline)
+        suffix = f", срок {goal['target_date']}" if goal.get("target_date") else ""
+        await message.answer(
+            f"🎯 *Копилка создана*\n\n{escape_markdown_v2(goal['name'])}: "
+            f"цель *{escape_markdown_v2(format_money(goal['target_amount_kopecks']))}*{escape_markdown_v2(suffix)}\n"
+            f"Пополнить: `/save 5000 {escape_markdown_v2(goal['name'])}`",
+            parse_mode="MarkdownV2",
+        )
+    except Exception as exc:
+        logger.error("cmd_goal failed: %s", exc)
+        await message.answer(f"❌ {escape_markdown_v2(str(exc))}", parse_mode="MarkdownV2")
+
+
+async def _savings_operation(message: types.Message, state: FSMContext, command: CommandObject, tx_type: str):
+    """Shared implementation of /save (tx_type='saving') and /withdraw (tx_type='withdrawal')."""
+    if not message.from_user:
+        return
+    parsed = parse_savings_args(command.args or "")
+    if parsed is None:
+        await message.answer(GOALS_USAGE, parse_mode="MarkdownV2")
+        return
+    kopecks, name_query = parsed
+
+    token, member_id, _ = await get_or_create_user_auth(message.from_user, state)
+    try:
+        goals = await api_client.get_goals(token)
+        matches = find_goals_by_name(goals, name_query)
+        if len(matches) != 1:
+            names = ", ".join(g["name"] for g in goals) or "копилок пока нет, создайте: /goal 150000 Отпуск"
+            reason = "не найдена" if not matches else "найдено несколько"
+            subject = f"«{name_query}»" if name_query else "(укажите название)"
+            await message.answer(
+                escape_markdown_v2(f"Копилка {subject} {reason}. Доступны: {names}"),
+                parse_mode="MarkdownV2",
+            )
+            return
+        goal = matches[0]
+
+        word = "Пополнение" if tx_type == "saving" else "Снятие"
+        tx_res = await api_client.create_transaction(
+            token=token,
+            amount_kopecks=kopecks,
+            description=f"{word}: {goal['name']}",
+            paid_by_member_id=member_id,
+            tx_type=tx_type,
+            goal_id=goal["id"],
+            tx_date=date.today().isoformat(),
+        )
+        updated = next((g for g in await api_client.get_goals(token) if g["id"] == goal["id"]), goal)
+        sign = "➕" if tx_type == "saving" else "➖"
+        await message.answer(
+            f"{sign} *{word}*: {escape_markdown_v2(goal['name'])} "
+            f"*{escape_markdown_v2(format_money(kopecks))}*\n"
+            f"{escape_markdown_v2(format_goal_line(updated))}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="❌ Отменить", callback_data=f"tx_reject:{tx_res.get('id', '')}")]]
+            ),
+        )
+    except Exception as exc:
+        logger.error("savings operation failed: %s", exc)
+        await message.answer(f"❌ {escape_markdown_v2(str(exc))}", parse_mode="MarkdownV2")
+
+
+@dp.message(Command("save"))
+async def cmd_save(message: types.Message, state: FSMContext, command: CommandObject):
+    await _savings_operation(message, state, command, "saving")
+
+
+@dp.message(Command("withdraw"))
+async def cmd_withdraw(message: types.Message, state: FSMContext, command: CommandObject):
+    await _savings_operation(message, state, command, "withdrawal")
+
+
+@dp.message(Command("goals"))
+async def cmd_goals(message: types.Message, state: FSMContext):
+    if not message.from_user:
+        return
+    token, _, _ = await get_or_create_user_auth(message.from_user, state)
+    try:
+        goals = await api_client.get_goals(token)
+        if not goals:
+            await message.answer(GOALS_USAGE, parse_mode="MarkdownV2")
+            return
+        lines = [f"• {escape_markdown_v2(format_goal_line(g))}" for g in goals]
+        await message.answer("🎯 *Копилки:*\n" + "\n".join(lines), parse_mode="MarkdownV2")
+    except Exception as exc:
+        logger.error("cmd_goals failed: %s", exc)
+        await message.answer(f"❌ {escape_markdown_v2(str(exc))}", parse_mode="MarkdownV2")
+
+
+
 @dp.callback_query(F.data.startswith("tx_reject:"))
 async def callback_reject_transaction(callback: types.CallbackQuery, state: FSMContext):
     """Cancel a transaction that was just entered."""
@@ -356,7 +552,10 @@ async def callback_reject_transaction(callback: types.CallbackQuery, state: FSMC
     try:
         await api_client.reject_transaction(token=token, draft_id=draft_id)
     except Exception as exc:
+        # Refused (e.g. the deposited money was already withdrawn): say why and keep the entry as it is.
         logger.warning("Reject call error for %s: %s", draft_id, exc)
+        await callback.answer(str(exc)[:190], show_alert=True)
+        return
 
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.reply(
@@ -470,6 +669,10 @@ async def main():
             BotCommand(command="dashboard", description="Сводка и прогноз бюджета"),
             BotCommand(command="transfer", description="Перевод участнику: /transfer Имя сумма"),
             BotCommand(command="debts", description="Кто кому должен"),
+            BotCommand(command="goals", description="Копилки и прогресс"),
+            BotCommand(command="goal", description="Новая копилка: /goal 150000 Отпуск"),
+            BotCommand(command="save", description="Пополнить копилку: /save 5000 Отпуск"),
+            BotCommand(command="withdraw", description="Снять из копилки: /withdraw 2000 Отпуск"),
             BotCommand(command="start", description="Начать"),
         ])
 

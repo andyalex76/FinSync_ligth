@@ -3,12 +3,24 @@ HTTP Client for FinSync FastAPI backend used by Telegram Bot (aiogram 3).
 Connects to the local FastAPI backend to execute authenticated PostgreSQL queries
 and document uploads without mock data.
 """
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
 import aiohttp
 
 logger = logging.getLogger("family_budget.bot_client")
+
+
+def _error_detail(status: int, body: str) -> str:
+    """Prefer the API's own `detail` message (already human-readable) over raw JSON."""
+    try:
+        detail = json.loads(body).get("detail")
+        if isinstance(detail, str) and detail:
+            return detail
+    except (ValueError, AttributeError):
+        pass
+    return f"HTTP {status}"
 
 
 class BotAPIClient:
@@ -115,10 +127,12 @@ class BotAPIClient:
         tx_date: Optional[str] = None,
         tags: Optional[List[str]] = None,
         to_member_id: Optional[str] = None,
+        goal_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Record a transaction in PostgreSQL (amount in kopecks).
         tx_type='transfer' requires to_member_id: the payer gives money to that member.
+        tx_type='saving' / 'withdrawal' require goal_id (deposit into / withdrawal from a savings goal).
         """
         session = await self.get_session()
         url = f"{self.base_url}/api/transactions"
@@ -134,46 +148,27 @@ class BotAPIClient:
         }
         if to_member_id:
             payload["to_member_id"] = to_member_id
+        if goal_id:
+            payload["goal_id"] = goal_id
         headers = self._auth_headers(token)
         headers["Content-Type"] = "application/json"
 
         async with session.post(url, json=payload, headers=headers) as resp:
             if resp.status in (200, 201):
                 return await resp.json()
-            err = await resp.text()
-            raise RuntimeError(f"Failed to create transaction: HTTP {resp.status} - {err}")
+            raise RuntimeError(_error_detail(resp.status, await resp.text()))
 
     async def reject_transaction(self, token: str, draft_id: str) -> Dict[str, Any]:
         """
         Cancel a transaction entered by mistake (status becomes "rejected").
+        Raises RuntimeError with the API's reason if it is refused (e.g. money already withdrawn).
         """
         session = await self.get_session()
         url = f"{self.base_url}/api/transactions/{draft_id}/reject"
-        headers = self._auth_headers(token)
-
-        # Support both DELETE and POST
-        try:
-            async with session.delete(url, headers=headers) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-        except Exception:
-            pass
-
-        async with session.post(url, headers=headers) as resp:
+        async with session.post(url, headers=self._auth_headers(token)) as resp:
             if resp.status == 200:
                 return await resp.json()
-            err = await resp.text()
-            raise RuntimeError(f"Failed to reject transaction: HTTP {resp.status} - {err}")
-
-    async def get_categories(self, token: str) -> List[Dict[str, Any]]:
-        """Fetch categories list from PostgreSQL."""
-        session = await self.get_session()
-        url = f"{self.base_url}/api/categories"
-        async with session.get(url, headers=self._auth_headers(token)) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data.get("items", [])
-            return []
+            raise RuntimeError(_error_detail(resp.status, await resp.text()))
 
     async def get_members(self, token: str) -> List[Dict[str, Any]]:
         """Active family members with their transfer balances."""
@@ -190,3 +185,26 @@ class BotAPIClient:
             if resp.status != 200:
                 raise RuntimeError(f"Failed to load settlements: HTTP {resp.status}")
             return await resp.json()
+
+    async def get_goals(self, token: str) -> List[Dict[str, Any]]:
+        """Savings goals with saved amount and progress."""
+        session = await self.get_session()
+        async with session.get(f"{self.base_url}/api/goals", headers=self._auth_headers(token)) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"Failed to load goals: HTTP {resp.status}")
+            return (await resp.json()).get("goals", [])
+
+    async def create_goal(
+        self, token: str, name: str, target_amount_kopecks: int, target_date: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Create a savings goal."""
+        session = await self.get_session()
+        headers = self._auth_headers(token)
+        headers["Content-Type"] = "application/json"
+        payload: Dict[str, Any] = {"name": name, "target_amount_kopecks": target_amount_kopecks}
+        if target_date:
+            payload["target_date"] = target_date
+        async with session.post(f"{self.base_url}/api/goals", json=payload, headers=headers) as resp:
+            if resp.status in (200, 201):
+                return await resp.json()
+            raise RuntimeError(_error_detail(resp.status, await resp.text()))

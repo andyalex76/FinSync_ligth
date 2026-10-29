@@ -317,3 +317,149 @@ async def test_debts_command_lists_who_owes_whom():
 
     text = message.answer.call_args.args[0]
     assert "Борис" in text and "Анна" in text and "3 000" in text
+
+
+# ---------------------------------------------------------------------------
+# Savings goals: /goal, /save, /withdraw, /goals
+# ---------------------------------------------------------------------------
+def test_parse_deadline_accepts_iso_and_dotted_dates_only():
+    from backend.bot import parse_deadline
+
+    assert parse_deadline("2027-06-30") == "2027-06-30"
+    assert parse_deadline("30.06.2027") == "2027-06-30"
+    assert parse_deadline("31.02.2027") is None
+    assert parse_deadline("завтра") is None
+
+
+def test_parse_goal_args():
+    from backend.bot import parse_goal_args
+
+    assert parse_goal_args("150000 Отпуск") == (15000000, "Отпуск", None)
+    assert parse_goal_args("150000 Отпуск на море до 30.06.2027") == (15000000, "Отпуск на море", "2027-06-30")
+    assert parse_goal_args("1500,50 Подушка ДО 2027-01-15") == (150050, "Подушка", "2027-01-15")
+    assert parse_goal_args("150000") is None            # no name
+    assert parse_goal_args("Отпуск 150000") is None     # amount must come first
+    assert parse_goal_args("150000 Отпуск до 99.99.2027") is None  # impossible date is refused, not ignored
+
+
+def test_parse_savings_args_and_goal_lookup():
+    from backend.bot import find_goals_by_name, parse_savings_args
+
+    assert parse_savings_args("5000 Отпуск") == (500000, "Отпуск")
+    assert parse_savings_args("5000") == (500000, "")
+    assert parse_savings_args("Отпуск 5000") is None
+    assert parse_savings_args("") is None
+
+    goals = [{"id": "1", "name": "Отпуск"}, {"id": "2", "name": "Отпуск на море"}, {"id": "3", "name": "Подушка"}]
+    assert [g["id"] for g in find_goals_by_name(goals, "отпуск")] == ["1"]        # exact beats prefix
+    assert [g["id"] for g in find_goals_by_name(goals, "отпуск н")] == ["2"]
+    assert [g["id"] for g in find_goals_by_name(goals, "душ")] == ["3"]            # substring
+    assert find_goals_by_name(goals, "") == []                                     # ambiguous without a name
+    assert [g["id"] for g in find_goals_by_name(goals[2:], "")] == ["3"]           # single goal: name optional
+    assert find_goals_by_name(goals, "машина") == []
+
+
+def test_format_goal_line_variants():
+    from backend.bot import format_goal_line
+
+    base = {"name": "Отпуск", "saved_kopecks": 300000, "target_amount_kopecks": 15000000,
+            "progress_percent": 2, "is_reached": False, "target_date": None}
+    assert format_goal_line(base) == "Отпуск: 3 000.00 ₽ из 150 000.00 ₽ (2%)"
+    with_date = {**base, "target_date": "2027-06-30", "is_overdue": False, "required_per_month_kopecks": 2100000}
+    assert "до 2027-06-30" in format_goal_line(with_date) and "21 000.00 ₽/мес" in format_goal_line(with_date)
+    assert "прошёл" in format_goal_line({**base, "target_date": "2020-01-01", "is_overdue": True})
+    assert "достигнута" in format_goal_line({**base, "is_reached": True})
+
+
+_AUTH = {"access_token": "jwt", "user": {"member_id": "m-anna", "family_id": "f"}}
+_GOAL = {"id": "g-1", "name": "Отпуск", "saved_kopecks": 0, "target_amount_kopecks": 15000000,
+         "progress_percent": 0, "is_reached": False, "target_date": None}
+
+
+@pytest.mark.asyncio
+async def test_goal_command_creates_a_goal():
+    from backend import bot as bot_module
+
+    message = _fake_message("/goal")
+    create = AsyncMock(return_value={**_GOAL, "target_date": "2027-06-30"})
+    with patch.object(bot_module.api_client, "auth_telegram", AsyncMock(return_value=_AUTH)), \
+         patch.object(bot_module.api_client, "create_goal", create):
+        await bot_module.cmd_goal(message, _fsm_context(), _command("150000 Отпуск до 30.06.2027"))
+
+    assert create.call_args.args[1:] == ("Отпуск", 15000000, "2027-06-30")
+    assert "Копилка создана" in message.answer.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_save_and_withdraw_commands_use_the_goal():
+    from backend import bot as bot_module
+
+    for command_fn, args, tx_type in (
+        (bot_module.cmd_save, "5000 отпуск", "saving"),
+        (bot_module.cmd_withdraw, "2000 отпуск", "withdrawal"),
+    ):
+        message = _fake_message("/x")
+        create = AsyncMock(return_value={"id": "tx-1"})
+        with patch.object(bot_module.api_client, "auth_telegram", AsyncMock(return_value=_AUTH)), \
+             patch.object(bot_module.api_client, "get_goals", AsyncMock(return_value=[_GOAL])), \
+             patch.object(bot_module.api_client, "create_transaction", create):
+            await command_fn(message, _fsm_context(), _command(args))
+
+        kwargs = create.call_args.kwargs
+        assert kwargs["tx_type"] == tx_type and kwargs["goal_id"] == "g-1"
+        assert kwargs["amount_kopecks"] in (500000, 200000)
+        assert "Отпуск" in message.answer.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_withdraw_shows_the_api_reason_when_refused():
+    from backend import bot as bot_module
+
+    message = _fake_message("/withdraw")
+    refused = AsyncMock(side_effect=RuntimeError("В копилке «Отпуск» только 0.00: снять больше нельзя"))
+    with patch.object(bot_module.api_client, "auth_telegram", AsyncMock(return_value=_AUTH)), \
+         patch.object(bot_module.api_client, "get_goals", AsyncMock(return_value=[_GOAL])), \
+         patch.object(bot_module.api_client, "create_transaction", refused):
+        await bot_module.cmd_withdraw(message, _fsm_context(), _command("9000"))
+
+    assert "снять больше нельзя" in message.answer.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_goals_command_lists_goals_or_shows_help():
+    from backend import bot as bot_module
+
+    message = _fake_message("/goals")
+    with patch.object(bot_module.api_client, "auth_telegram", AsyncMock(return_value=_AUTH)), \
+         patch.object(bot_module.api_client, "get_goals", AsyncMock(return_value=[_GOAL])):
+        await bot_module.cmd_goals(message, _fsm_context())
+    assert "Отпуск" in message.answer.call_args.args[0]
+
+    empty = _fake_message("/goals")
+    with patch.object(bot_module.api_client, "auth_telegram", AsyncMock(return_value=_AUTH)), \
+         patch.object(bot_module.api_client, "get_goals", AsyncMock(return_value=[])):
+        await bot_module.cmd_goals(empty, _fsm_context())
+    assert "/goal" in empty.answer.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_cancel_button_reports_a_refused_cancellation_instead_of_lying():
+    from backend import bot as bot_module
+
+    callback = MagicMock()
+    callback.data = "tx_reject:tx-1"
+    callback.from_user = MagicMock(id=235794506, first_name="Андрей", last_name=None, username="andy")
+    callback.message = MagicMock()
+    callback.message.edit_reply_markup = AsyncMock()
+    callback.message.reply = AsyncMock()
+    callback.answer = AsyncMock()
+    refused = AsyncMock(side_effect=RuntimeError("Нельзя отменить пополнение: эти деньги уже сняты с копилки"))
+
+    with patch.object(bot_module.api_client, "auth_telegram", AsyncMock(return_value=_AUTH)), \
+         patch.object(bot_module.api_client, "reject_transaction", refused):
+        await bot_module.callback_reject_transaction(callback, _fsm_context())
+
+    callback.message.reply.assert_not_called()          # no "Запись отменена"
+    callback.message.edit_reply_markup.assert_not_called()  # the entry (and button) stay
+    assert "уже сняты" in callback.answer.call_args.args[0]
+    assert callback.answer.call_args.kwargs.get("show_alert") is True
