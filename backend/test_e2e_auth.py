@@ -4,62 +4,19 @@ user, auth flow, transactions and transfer-based settlements.
 Skipped automatically when the database is not reachable; CI provides a Postgres service.
 """
 import asyncio
-import os
-from pathlib import Path
 
 import pytest
 
 try:
     from backend.database import engine
+    from backend.e2e_helpers import ANNA, BORIS, BOT_KEY, db_or_skip, login, migrate_to_head, wipe_operations
     from backend.main import app
 except ImportError:
     from database import engine
+    from e2e_helpers import ANNA, BORIS, BOT_KEY, db_or_skip, login, migrate_to_head, wipe_operations
     from main import app
 
 from sqlalchemy import text
-
-BOT_KEY = {"X-Internal-Key": os.environ.get("INTERNAL_API_KEY", "ci-test-internal-worker-key")}
-ANNA = 424242001
-BORIS = 424242002
-BACKEND_DIR = Path(__file__).resolve().parent
-
-
-def _alembic_config():
-    from alembic.config import Config
-
-    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
-    cfg.set_main_option("script_location", str(BACKEND_DIR / "migrations"))
-    return cfg
-
-
-async def _db_or_skip():
-    # Connections pooled by earlier tests belong to another event loop: start from a clean pool.
-    await engine.dispose()
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-    except Exception:
-        pytest.skip("PostgreSQL is not available")
-
-
-async def _migrate_to_head():
-    from alembic import command
-
-    cfg = _alembic_config()
-    # env.py runs its own event loop, so Alembic must not run in this loop's thread.
-    await asyncio.to_thread(command.upgrade, cfg, "head")
-    return cfg
-
-
-async def _login(client, telegram_id, name):
-    r = await client.post(
-        "/api/auth/telegram",
-        json={"telegram_id": telegram_id, "first_name": name},
-        headers=BOT_KEY,
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    return {"Authorization": f"Bearer {body['access_token']}"}, body["user"]["member_id"]
 
 
 @pytest.mark.asyncio
@@ -67,9 +24,9 @@ async def test_migrations_match_models():
     """Alembic is the only source of the schema: after upgrade head there must be no drift."""
     from alembic import command
 
-    await _db_or_skip()
+    await db_or_skip()
     try:
-        cfg = await _migrate_to_head()
+        cfg = await migrate_to_head()
         await asyncio.to_thread(command.check, cfg)
     finally:
         await engine.dispose()
@@ -79,12 +36,12 @@ async def test_migrations_match_models():
 async def test_bot_login_dashboard_flow_on_real_database(monkeypatch):
     from httpx import ASGITransport, AsyncClient
 
-    await _db_or_skip()
+    await db_or_skip()
     monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", str(ANNA))
     try:
-        await _migrate_to_head()
+        await migrate_to_head()
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as c:
-            headers, _ = await _login(c, ANNA, "Анна")
+            headers, _ = await login(c, ANNA, "Анна")
 
             assert (await c.get("/api/dashboard/summary", headers=headers)).status_code == 200
             assert (await c.get("/api/dashboard/forecast", headers=headers)).status_code == 200
@@ -112,17 +69,15 @@ async def test_bot_login_dashboard_flow_on_real_database(monkeypatch):
 async def test_family_bootstrap_transfers_and_settlements(monkeypatch):
     from httpx import ASGITransport, AsyncClient
 
-    await _db_or_skip()
+    await db_or_skip()
     monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", f"{ANNA},{BORIS}")
     try:
-        await _migrate_to_head()
-        async with engine.begin() as conn:  # test database only
-            await conn.execute(text("DELETE FROM transaction_tags"))
-            await conn.execute(text("DELETE FROM transactions"))
+        await migrate_to_head()
+        await wipe_operations()
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as c:
-            anna_h, anna_member = await _login(c, ANNA, "Анна")
-            boris_h, boris_member = await _login(c, BORIS, "Борис")
+            anna_h, anna_member = await login(c, ANNA, "Анна")
+            boris_h, boris_member = await login(c, BORIS, "Борис")
 
             # No demo people: only the real, logged-in users are family members
             members = (await c.get("/api/family/members", headers=anna_h)).json()

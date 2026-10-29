@@ -32,3 +32,14 @@ def test_removed_tables_are_gone_and_transfers_have_a_recipient():
         assert gone not in tables, gone
     assert "to_member_id" in Transaction.__table__.c
     assert "document_id" not in Transaction.__table__.c
+
+
+def test_savings_balance_is_derived_not_stored():
+    try:
+        from backend.models import SavingsGoal, Transaction, TransactionType
+    except ImportError:
+        from models import SavingsGoal, Transaction, TransactionType
+
+    assert "current_amount_kopecks" not in SavingsGoal.__table__.c
+    assert "goal_id" in Transaction.__table__.c
+    assert TransactionType.WITHDRAWAL.value == "withdrawal"

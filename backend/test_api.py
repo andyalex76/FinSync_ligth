@@ -41,7 +41,7 @@ except ImportError:
 
 # Import auth functions
 try:
-    from backend.auth import create_access_token, decode_access_token, verify_token
+    from backend.auth import create_access_token, decode_access_token
 except ImportError:
     from auth import create_access_token, decode_access_token
 

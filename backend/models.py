@@ -34,7 +34,8 @@ class TransactionType(str, enum.Enum):
     EXPENSE = "expense"
     INCOME = "income"
     TRANSFER = "transfer"
-    SAVING = "saving"
+    SAVING = "saving"          # deposit into a savings goal
+    WITHDRAWAL = "withdrawal"  # withdrawal from a savings goal
 
 
 class TransactionStatus(str, enum.Enum):
@@ -136,14 +137,21 @@ class Transaction(Base):
             name="ck_transfer_recipient",
         ),
         CheckConstraint("amount_kopecks > 0", name="ck_amount_positive"),
+        # Savings operations belong to exactly one goal; nothing else may point at a goal.
+        CheckConstraint(
+            "(type IN ('saving', 'withdrawal') AND goal_id IS NOT NULL) "
+            "OR (type NOT IN ('saving', 'withdrawal') AND goal_id IS NULL)",
+            name="ck_goal_link",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     family_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("family.id", ondelete="CASCADE"), index=True)
     paid_by_member_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("family_members.id"))
     to_member_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("family_members.id"))
+    goal_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("savings_goals.id"))
     category_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("categories.id", ondelete="SET NULL"))
-    type: Mapped[str] = mapped_column(String(16))  # expense, income, transfer, saving
+    type: Mapped[str] = mapped_column(String(16))  # expense, income, transfer, saving, withdrawal
     amount_kopecks: Mapped[int] = mapped_column(BigInteger)  # Stored in minor units!
     currency: Mapped[str] = mapped_column(String(3), default="RUB")
     description: Mapped[str] = mapped_column(Text)
@@ -187,12 +195,9 @@ class SavingsGoal(Base):
     family_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("family.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(128))
     target_amount_kopecks: Mapped[int] = mapped_column(BigInteger)
-    current_amount_kopecks: Mapped[int] = mapped_column(BigInteger, default=0)
     target_date: Mapped[Optional[date]] = mapped_column(Date)
     icon: Mapped[str] = mapped_column(String(32), default="PiggyBank")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     family: Mapped["Family"] = relationship(back_populates="funds")
 
-
-Fund = SavingsGoal

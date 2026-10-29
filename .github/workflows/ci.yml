@@ -77,4 +77,4 @@ jobs:
           TELEGRAM_BOT_TOKEN: "123456:ABCdefGhIJKlmNoPQRsTUVwxyZ_0123456"
           ALLOWED_TELEGRAM_IDS: "123456789"
           DATABASE_URL: postgresql+asyncpg://budget_admin:ci_only_password@localhost:5432/family_budget
-        run: pytest backend/test_api.py backend/test_bot.py backend/test_security.py backend/test_models.py backend/test_settlements.py backend/test_e2e_auth.py -v
+        run: pytest backend/test_api.py backend/test_bot.py backend/test_security.py backend/test_models.py backend/test_settlements.py backend/test_goals.py backend/test_e2e_auth.py backend/test_e2e_goals_dashboard.py -v

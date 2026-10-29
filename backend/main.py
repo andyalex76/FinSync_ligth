@@ -37,7 +37,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import case, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -81,6 +81,7 @@ try:
         Category,
         Family,
         FamilyMember,
+        SavingsGoal,
         Tag,
         Transaction,
         TransactionTag,
@@ -93,6 +94,7 @@ except ImportError:
         Category,
         Family,
         FamilyMember,
+        SavingsGoal,
         Tag,
         Transaction,
         TransactionTag,
@@ -100,8 +102,10 @@ except ImportError:
     )
 
 try:
+    from backend.goals import goal_progress
     from backend.settlements import compute_balances, compute_settlements
 except ImportError:
+    from goals import goal_progress
     from settlements import compute_balances, compute_settlements
 
 try:
@@ -320,12 +324,13 @@ class FamilySetupPayload(BaseModel):
 
 
 class TransactionCreate(BaseModel):
-    type: str = Field(..., pattern="^(expense|income|transfer|saving)$")
+    type: str = Field(..., pattern="^(expense|income|transfer|saving|withdrawal)$")
     amount_kopecks: int = Field(..., gt=0, description="Amount in minor units (kopecks/cents)")
     currency: str = Field(default="RUB", pattern="^(RUB|USD|EUR)$")
     category_id: Optional[str] = None
     paid_by_member_id: Optional[str] = None
     to_member_id: Optional[str] = Field(default=None, description="Recipient of a transfer (type='transfer')")
+    goal_id: Optional[str] = Field(default=None, description="Savings goal (type='saving' deposit / 'withdrawal')")
     description: str
     transaction_date: str = Field(..., description="YYYY-MM-DD")
     tags: List[str] = []
@@ -336,7 +341,18 @@ class TransactionCreate(BaseModel):
             raise ValueError("Для перевода нужен получатель (to_member_id)")
         if self.type != "transfer" and self.to_member_id:
             raise ValueError("to_member_id допустим только для перевода")
+        if self.type in ("saving", "withdrawal") and not self.goal_id:
+            raise ValueError("Для пополнения и снятия нужна копилка (goal_id)")
+        if self.type not in ("saving", "withdrawal") and self.goal_id:
+            raise ValueError("goal_id допустим только для пополнения и снятия копилки")
         return self
+
+
+class GoalCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    target_amount_kopecks: int = Field(..., gt=0, description="Target amount in kopecks")
+    target_date: Optional[str] = Field(default=None, description="YYYY-MM-DD")
+    icon: str = Field(default="PiggyBank", max_length=32)
 
 
 class BatchSyncItem(BaseModel):
@@ -1150,6 +1166,52 @@ async def _existing_category_id(
     return cat
 
 
+async def _find_goal(
+    session: AsyncSession, family: Family, supplied: Optional[str], lock: bool = False
+) -> Optional[SavingsGoal]:
+    """A savings goal of this family. lock=True takes a row lock so two withdrawals cannot overdraw it."""
+    if not supplied:
+        return None
+    stmt = select(SavingsGoal).where(SavingsGoal.id == to_uuid(supplied), SavingsGoal.family_id == family.id)
+    if lock:
+        stmt = stmt.with_for_update()
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _goal_saved_map(session: AsyncSession, family: Family) -> Dict[uuid.UUID, int]:
+    """Saved amount per goal: deposits minus withdrawals (the only source of truth, nothing is stored)."""
+    signed = case((Transaction.type == "saving", Transaction.amount_kopecks), else_=-Transaction.amount_kopecks)
+    stmt = (
+        select(Transaction.goal_id, func.coalesce(func.sum(signed), 0))
+        .where(
+            Transaction.family_id == family.id,
+            Transaction.goal_id.is_not(None),
+            Transaction.type.in_(("saving", "withdrawal")),
+            Transaction.status != "rejected",
+        )
+        .group_by(Transaction.goal_id)
+    )
+    return {goal_id: int(total) for goal_id, total in (await session.execute(stmt)).all()}
+
+
+async def _goals_payload(session: AsyncSession, family: Family, today: date) -> List[Dict[str, Any]]:
+    goals = (await session.execute(
+        select(SavingsGoal).where(SavingsGoal.family_id == family.id).order_by(SavingsGoal.created_at)
+    )).scalars().all()
+    saved = await _goal_saved_map(session, family)
+    return [
+        {
+            "id": str(g.id),
+            "name": g.name,
+            "icon": g.icon,
+            "target_amount_kopecks": g.target_amount_kopecks,
+            "target_date": g.target_date.isoformat() if g.target_date else None,
+            **goal_progress(g.target_amount_kopecks, saved.get(g.id, 0), g.target_date, today),
+        }
+        for g in goals
+    ]
+
+
 @app.get("/api/transactions", tags=["Transactions"])
 @limiter.limit("60/minute")
 async def list_transactions(
@@ -1229,8 +1291,21 @@ async def create_transaction(
         if recipient.id == payer.id:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Нельзя переводить самому себе")
 
+    goal = None
+    if payload.type in ("saving", "withdrawal"):
+        goal = await _find_goal(session, family, payload.goal_id, lock=True)
+        if goal is None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Копилка не найдена")
+        if payload.type == "withdrawal":
+            saved = (await _goal_saved_map(session, family)).get(goal.id, 0)
+            if payload.amount_kopecks > saved:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"В копилке «{goal.name}» только {saved / 100:.2f}: снять больше нельзя",
+                )
+
     cat_uuid = None
-    if payload.type != "transfer":
+    if payload.type in ("expense", "income"):
         cat_uuid = await _existing_category_id(session, family, payload.category_id)
     if not cat_uuid and payload.type == "expense":
         desc_lower = payload.description.lower()
@@ -1272,6 +1347,7 @@ async def create_transaction(
         family_id=family.id,
         paid_by_member_id=payer.id,
         to_member_id=recipient.id if recipient else None,
+        goal_id=goal.id if goal else None,
         category_id=cat_uuid,
         type=payload.type,
         amount_kopecks=payload.amount_kopecks,
@@ -1306,10 +1382,14 @@ async def create_transaction(
         "category_id": str(tx.category_id) if tx.category_id else None,
         "paid_by_member_id": str(tx.paid_by_member_id),
         "to_member_id": str(tx.to_member_id) if tx.to_member_id else None,
+        "goal_id": str(tx.goal_id) if tx.goal_id else None,
         "description": tx.description,
         "transaction_date": tx.transaction_date.isoformat(),
         "created_at": tx.created_at.isoformat(),
     }
+
+
+_LINKED_TYPES = ("transfer", "saving", "withdrawal")
 
 
 @app.post("/api/transactions/sync", tags=["Transactions"])
@@ -1343,10 +1423,10 @@ async def batch_sync_transactions(
             if existing:
                 existing.amount_kopecks = item.amount_kopecks
                 existing.description = item.description
-                # Transfer-ness (and its recipient) is fixed at creation.
-                if item.type != "transfer" and existing.type != "transfer":
+                # Transfers and savings operations (recipient / goal) are fixed at creation.
+                if item.type not in _LINKED_TYPES and existing.type not in _LINKED_TYPES:
                     existing.type = item.type
-                if existing.type != "transfer":
+                if existing.type in ("expense", "income"):
                     cat_id = await _existing_category_id(session, family, item.category_id)
                     if cat_id:
                         existing.category_id = cat_id
@@ -1360,6 +1440,11 @@ async def batch_sync_transactions(
         else:  # create
             existing = (await session.execute(select(Transaction).where(Transaction.id == item_uuid))).scalar_one_or_none()
             if not existing:
+                if item.type in ("saving", "withdrawal"):
+                    # Goals live on the server now: the legacy client cannot name a valid goal.
+                    logger.warning("sync_skipped_savings_item", item_id=item.id)
+                    synced_ids.append(item.id)
+                    continue
                 payer = await _resolve_payer(session, family, item.paid_by_member_id, token_data)
                 recipient = None
                 if item.type == "transfer":
@@ -1413,11 +1498,21 @@ async def reject_draft_transaction(
     Cancel a transaction entered by mistake (the "Отменить" button in the bot).
     The row is kept with status 'rejected' and is excluded from all totals.
     """
+    family = await get_or_create_default_family(session)
     tx_uuid = to_uuid(draft_id)
-    stmt = select(Transaction).where(Transaction.id == tx_uuid)
+    stmt = select(Transaction).where(Transaction.id == tx_uuid, Transaction.family_id == family.id)
     tx = (await session.execute(stmt)).scalar_one_or_none()
 
-    if tx:
+    if tx and tx.status != "rejected":
+        if tx.type == "saving" and tx.goal_id:
+            # Cancelling a deposit must not leave the goal with a negative balance.
+            await _find_goal(session, family, str(tx.goal_id), lock=True)
+            saved = (await _goal_saved_map(session, family)).get(tx.goal_id, 0)
+            if saved - tx.amount_kopecks < 0:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Нельзя отменить пополнение: эти деньги уже сняты с копилки",
+                )
         tx.status = "rejected"
         await session.flush()
 
@@ -1425,8 +1520,132 @@ async def reject_draft_transaction(
 
 
 # ---------------------------------------------------------------------
+# Savings goals (balance = deposits - withdrawals, see /api/transactions)
+# ---------------------------------------------------------------------
+@app.post("/api/goals", status_code=status.HTTP_201_CREATED, tags=["Savings"])
+@limiter.limit("30/minute")
+async def create_goal(
+    request: Request,
+    payload: GoalCreate,
+    session: AsyncSession = Depends(get_session),
+    token_data: Dict[str, Any] = Depends(verify_token),
+):
+    """Create a savings goal. Deposit with type='saving', withdraw with type='withdrawal' (goal_id)."""
+    family = await get_or_create_default_family(session)
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Название не может быть пустым")
+
+    target_date = None
+    if payload.target_date:
+        try:
+            target_date = date.fromisoformat(payload.target_date)
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Дата должна быть в формате ГГГГ-ММ-ДД")
+        if target_date < date.today():
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Срок цели уже прошёл")
+
+    taken = (await session.execute(
+        select(SavingsGoal.id).where(
+            SavingsGoal.family_id == family.id, func.lower(SavingsGoal.name) == name.lower()
+        )
+    )).first()
+    if taken:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Копилка «{name}» уже есть")
+
+    goal = SavingsGoal(
+        family_id=family.id,
+        name=name,
+        target_amount_kopecks=payload.target_amount_kopecks,
+        target_date=target_date,
+        icon=payload.icon,
+    )
+    session.add(goal)
+    await session.flush()
+
+    return {
+        "id": str(goal.id),
+        "name": goal.name,
+        "icon": goal.icon,
+        "target_amount_kopecks": goal.target_amount_kopecks,
+        "target_date": goal.target_date.isoformat() if goal.target_date else None,
+        **goal_progress(goal.target_amount_kopecks, 0, goal.target_date, date.today()),
+    }
+
+
+@app.get("/api/goals", tags=["Savings"])
+@limiter.limit("60/minute")
+async def list_goals(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    token_data: Dict[str, Any] = Depends(verify_token),
+):
+    """All savings goals with the saved amount and progress."""
+    family = await get_or_create_default_family(session)
+    goals = await _goals_payload(session, family, date.today())
+    return {"count": len(goals), "goals": goals}
+
+
+# ---------------------------------------------------------------------
 # 5. DASHBOARD & FORECAST
 # ---------------------------------------------------------------------
+def _month_bounds(today: date) -> tuple:
+    days_in_month = calendar.monthrange(today.year, today.month)[1]
+    return date(today.year, today.month, 1), date(today.year, today.month, days_in_month)
+
+
+async def _month_total(
+    session: AsyncSession, family: Family, tx_types: tuple, start: date, end: date
+) -> int:
+    """Sum of confirmed transactions of the given types within [start, end]."""
+    stmt = select(func.coalesce(func.sum(Transaction.amount_kopecks), 0)).where(
+        Transaction.family_id == family.id,
+        Transaction.type.in_(tx_types),
+        Transaction.status != "rejected",
+        Transaction.transaction_date.between(start, end),
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def _forecast_payload(session: AsyncSession, family: Family, today: date) -> Dict[str, Any]:
+    """
+    End-of-month expense forecast from the current daily burn rate:
+    projected = (actual_spent / days_passed) * total_days_in_month
+    Transfers, savings and withdrawals are not expenses and never enter the forecast.
+    """
+    days_passed = max(1, today.day)
+    start_date, end_date = _month_bounds(today)
+    total_days = end_date.day
+    month_str = f"{today.year}-{today.month:02d}"
+
+    actual_spent_kopecks = await _month_total(session, family, ("expense",), start_date, end_date)
+    total_budget_kopecks = int((await session.execute(
+        select(func.coalesce(func.sum(Budget.limit_kopecks), 0)).where(
+            Budget.family_id == family.id,
+            Budget.month_period == month_str,
+        )
+    )).scalar_one())
+
+    daily_burn_kopecks = actual_spent_kopecks // days_passed
+    projected_spent_kopecks = daily_burn_kopecks * total_days
+    # Without any configured budget there is nothing to compare with: no invented default limit.
+    variance_kopecks = projected_spent_kopecks - total_budget_kopecks if total_budget_kopecks > 0 else 0
+
+    return {
+        "current_month": month_str,
+        "days_passed": days_passed,
+        "days_total": total_days,
+        "days_remaining": total_days - days_passed,
+        "actual_spent_kopecks": actual_spent_kopecks,
+        "daily_average_kopecks": daily_burn_kopecks,
+        "projected_spent_kopecks": projected_spent_kopecks,
+        "total_budget_kopecks": total_budget_kopecks,
+        "variance_kopecks": variance_kopecks,
+        "is_over_budget": total_budget_kopecks > 0 and variance_kopecks > 0,
+        "has_budget": total_budget_kopecks > 0,
+    }
+
+
 @app.get("/api/dashboard/summary", tags=["Dashboard"])
 @limiter.limit("60/minute")
 async def get_dashboard_summary(
@@ -1434,48 +1653,20 @@ async def get_dashboard_summary(
     session: AsyncSession = Depends(get_session),
     token_data: Dict[str, Any] = Depends(verify_token),
 ):
-    """
-    Monthly totals, active budgets, participant balances, and recent activities from PostgreSQL.
-    """
+    """Monthly income / expenses (kept for the bot's /dashboard command)."""
     family = await get_or_create_default_family(session)
     today = date.today()
-    month_str = f"{today.year}-{today.month:02d}"
+    start_date, end_date = _month_bounds(today)
 
-    days_in_month = calendar.monthrange(today.year, today.month)[1]
-    start_date = date(today.year, today.month, 1)
-    end_date = date(today.year, today.month, days_in_month)
-
-    # Sum of income
-    inc_stmt = select(func.coalesce(func.sum(Transaction.amount_kopecks), 0)).where(
-        Transaction.family_id == family.id,
-        Transaction.type == "income",
-        Transaction.status != "rejected",
-        Transaction.transaction_date.between(start_date, end_date),
-    )
-    total_income = (await session.execute(inc_stmt)).scalar_one()
-
-    # Sum of expenses
-    exp_stmt = select(func.coalesce(func.sum(Transaction.amount_kopecks), 0)).where(
-        Transaction.family_id == family.id,
-        Transaction.type == "expense",
-        Transaction.status != "rejected",
-        Transaction.transaction_date.between(start_date, end_date),
-    )
-    total_expenses = (await session.execute(exp_stmt)).scalar_one()
-
-    # Drafts pending review
-    draft_stmt = select(func.count(Transaction.id)).where(
-        Transaction.family_id == family.id,
-        Transaction.status == "review_needed",
-    )
-    drafts_count = (await session.execute(draft_stmt)).scalar_one()
+    total_income = await _month_total(session, family, ("income",), start_date, end_date)
+    total_expenses = await _month_total(session, family, ("expense",), start_date, end_date)
 
     return {
-        "period": month_str,
+        "period": f"{today.year}-{today.month:02d}",
         "total_income_kopecks": total_income,
         "total_expenses_kopecks": total_expenses,
         "net_savings_kopecks": total_income - total_expenses,
-        "drafts_pending_count": drafts_count,
+        "drafts_pending_count": 0,
     }
 
 
@@ -1486,52 +1677,138 @@ async def get_expense_forecast(
     session: AsyncSession = Depends(get_session),
     token_data: Dict[str, Any] = Depends(verify_token),
 ):
+    """End-of-month expense forecast (kept for the bot's /dashboard command)."""
+    family = await get_or_create_default_family(session)
+    return await _forecast_payload(session, family, date.today())
+
+
+@app.get("/api/dashboard", tags=["Dashboard"])
+@limiter.limit("60/minute")
+async def get_dashboard(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    token_data: Dict[str, Any] = Depends(verify_token),
+):
     """
-    End-of-month expense forecast based on current daily burn rate from PostgreSQL data:
-    projected = (actual_spent / days_passed) * total_days_in_month
+    Everything the read-only dashboard screen shows, in one request, straight from the database:
+    month totals, budgets plan vs fact, forecast, savings goals, recent operations and settlements.
     """
     family = await get_or_create_default_family(session)
     today = date.today()
-    days_passed = max(1, today.day)
-    total_days = calendar.monthrange(today.year, today.month)[1]
-    days_remaining = total_days - days_passed
+    start_date, end_date = _month_bounds(today)
     month_str = f"{today.year}-{today.month:02d}"
 
-    start_date = date(today.year, today.month, 1)
-    end_date = date(today.year, today.month, total_days)
+    income = await _month_total(session, family, ("income",), start_date, end_date)
+    expenses = await _month_total(session, family, ("expense",), start_date, end_date)
+    deposits = await _month_total(session, family, ("saving",), start_date, end_date)
+    withdrawals = await _month_total(session, family, ("withdrawal",), start_date, end_date)
+    saved_this_month = deposits - withdrawals
 
-    # Actual spent so far this month
-    spent_stmt = select(func.coalesce(func.sum(Transaction.amount_kopecks), 0)).where(
-        Transaction.family_id == family.id,
-        Transaction.type == "expense",
-        Transaction.status != "rejected",
-        Transaction.transaction_date.between(start_date, end_date),
-    )
-    actual_spent_kopecks = (await session.execute(spent_stmt)).scalar_one()
+    # Budgets: plan vs fact per category
+    spent_rows = (await session.execute(
+        select(Transaction.category_id, func.coalesce(func.sum(Transaction.amount_kopecks), 0))
+        .where(
+            Transaction.family_id == family.id,
+            Transaction.type == "expense",
+            Transaction.status != "rejected",
+            Transaction.transaction_date.between(start_date, end_date),
+        )
+        .group_by(Transaction.category_id)
+    )).all()
+    spent_by_category = {cat_id: int(total) for cat_id, total in spent_rows}
 
-    # Total budget configured for this month
-    budget_stmt = select(func.coalesce(func.sum(Budget.limit_kopecks), 0)).where(
-        Budget.family_id == family.id,
-        Budget.month_period == month_str,
-    )
-    total_budget_kopecks = (await session.execute(budget_stmt)).scalar_one()
-    daily_burn_kopecks = actual_spent_kopecks // days_passed
-    projected_spent_kopecks = daily_burn_kopecks * total_days
-    # Without any configured budget there is nothing to compare with: no invented default limit.
-    variance_kopecks = projected_spent_kopecks - total_budget_kopecks if total_budget_kopecks > 0 else 0
+    budget_rows = (await session.execute(
+        select(Budget, Category)
+        .join(Category, Category.id == Budget.category_id)
+        .where(Budget.family_id == family.id, Budget.month_period == month_str)
+        .order_by(Category.sort_order)
+    )).all()
+    budgets = []
+    budgeted_spent = 0
+    for budget, category in budget_rows:
+        spent = spent_by_category.get(category.id, 0)
+        budgeted_spent += spent
+        limit = budget.limit_kopecks
+        budgets.append({
+            "category_id": str(category.id),
+            "name": category.name,
+            "icon": category.icon,
+            "color": category.color,
+            "limit_kopecks": limit,
+            "spent_kopecks": spent,
+            "remaining_kopecks": max(limit - spent, 0),
+            "percent": int(spent * 100 // limit) if limit > 0 else 0,
+            "is_over": spent > limit,
+        })
+
+    # Names for the recent-operations list
+    members = (await session.execute(
+        select(FamilyMember).where(FamilyMember.family_id == family.id).order_by(FamilyMember.created_at)
+    )).scalars().all()
+    member_names = {m.id: m.display_name for m in members}
+    category_names = {
+        c.id: c.name for c in (await session.execute(
+            select(Category).where(Category.family_id == family.id)
+        )).scalars().all()
+    }
+    goals = await _goals_payload(session, family, today)
+    goal_names = {to_uuid(g["id"]): g["name"] for g in goals}
+
+    recent = (await session.execute(
+        select(Transaction)
+        .where(Transaction.family_id == family.id, Transaction.status != "rejected")
+        .order_by(Transaction.transaction_date.desc(), Transaction.created_at.desc())
+        .limit(10)
+    )).scalars().all()
+
+    transfer_rows = await _transfer_rows(session, family)
+    balances = compute_balances(transfer_rows)
+    settlements = [
+        {
+            **debt,
+            "debtor_name": member_names.get(to_uuid(debt["debtor_member_id"]), "?"),
+            "creditor_name": member_names.get(to_uuid(debt["creditor_member_id"]), "?"),
+        }
+        for debt in compute_settlements(transfer_rows)
+    ]
 
     return {
-        "current_month": month_str,
-        "days_passed": days_passed,
-        "days_total": total_days,
-        "days_remaining": days_remaining,
-        "actual_spent_kopecks": actual_spent_kopecks,
-        "daily_average_kopecks": daily_burn_kopecks,
-        "projected_spent_kopecks": projected_spent_kopecks,
-        "total_budget_kopecks": total_budget_kopecks,
-        "variance_kopecks": variance_kopecks,
-        "is_over_budget": total_budget_kopecks > 0 and variance_kopecks > 0,
-        "has_budget": total_budget_kopecks > 0,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "period": month_str,
+        "totals": {
+            "income_kopecks": income,
+            "expenses_kopecks": expenses,
+            "saved_kopecks": saved_this_month,
+            "balance_kopecks": income - expenses - saved_this_month,
+        },
+        "forecast": await _forecast_payload(session, family, today),
+        "budgets": budgets,
+        "unbudgeted_spent_kopecks": max(expenses - budgeted_spent, 0),
+        "goals": goals,
+        "recent_transactions": [
+            {
+                "id": str(t.id),
+                "date": t.transaction_date.isoformat(),
+                "type": t.type,
+                "amount_kopecks": t.amount_kopecks,
+                "description": t.description,
+                "category_name": category_names.get(t.category_id),
+                "paid_by_name": member_names.get(t.paid_by_member_id),
+                "to_name": member_names.get(t.to_member_id) if t.to_member_id else None,
+                "goal_name": goal_names.get(t.goal_id) if t.goal_id else None,
+            }
+            for t in recent
+        ],
+        "members": [
+            {
+                "id": str(m.id),
+                "name": m.display_name,
+                "avatar": m.avatar_emoji,
+                "balance_kopecks": balances.get(str(m.id), 0),
+            }
+            for m in members if m.is_active
+        ],
+        "settlements": settlements,
     }
 
 
