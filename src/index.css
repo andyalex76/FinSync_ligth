@@ -31,27 +31,6 @@
   }
 }
 
-/* Hide scrollbar for clean iOS horizontal swiping */
-.no-scrollbar::-webkit-scrollbar {
-  display: none;
-}
-.no-scrollbar {
-  -ms-overflow-style: none;
-  scrollbar-width: none;
-}
-
-/* iOS Safe area utility classes */
-.pt-safe {
-  padding-top: max(0.75rem, env(safe-area-inset-top, 0px));
-}
-.pb-safe {
-  padding-bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
-}
-.dock-safe-bottom {
-  padding-bottom: calc(0.5rem + env(safe-area-inset-bottom, 0px));
-  height: calc(4.25rem + env(safe-area-inset-bottom, 0px));
-}
-
 /* Accessibility: prefers-reduced-motion for motion-sensitive users */
 @media (prefers-reduced-motion: reduce) {
   *,

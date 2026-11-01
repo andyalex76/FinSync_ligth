@@ -139,12 +139,5 @@ async def test_savings_goals_and_dashboard(monkeypatch):
             assert (dash["settlements"][0]["debtor_name"], dash["settlements"][0]["creditor_name"]) == ("Борис", "Анна")
             balances = {m["name"]: m["balance_kopecks"] for m in dash["members"]}
             assert balances["Анна"] == 300_000 and balances["Борис"] == -300_000
-
-            # Legacy web client: savings operations without a server-side goal are dropped, not retried forever
-            r = await c.post("/api/transactions/sync", headers=anna_h, json={"items": [{
-                "id": "tx-legacy-saving", "action": "create", "type": "saving", "amount_kopecks": 100,
-                "paid_by_member_id": "mem-01", "description": "legacy", "transaction_date": TODAY,
-            }]})
-            assert r.status_code == 200 and r.json()["synced_ids"] == ["tx-legacy-saving"]
     finally:
         await engine.dispose()

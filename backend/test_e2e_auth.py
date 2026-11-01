@@ -161,13 +161,5 @@ async def test_family_bootstrap_transfers_and_settlements(monkeypatch):
                         "SELECT gen_random_uuid(), family_id, id, 'transfer', 100, 'RUB', 'bad', now(), 'confirmed', now() "
                         "FROM family_members LIMIT 1"
                     ))
-
-            # Legacy sync endpoint: a transfer without a valid recipient is dropped, not retried forever
-            r = await c.post("/api/transactions/sync", headers=anna_h, json={"items": [{
-                "id": "tx-legacy-1", "action": "create", "type": "transfer", "amount_kopecks": 100,
-                "paid_by_member_id": "mem-02", "description": "legacy", "transaction_date": "2026-10-01",
-            }]})
-            assert r.status_code == 200
-            assert r.json()["synced_ids"] == ["tx-legacy-1"]
     finally:
         await engine.dispose()

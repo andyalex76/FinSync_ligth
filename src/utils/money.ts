@@ -1,9 +1,8 @@
 import { Currency } from '../types';
 
 /**
- * Money utility conforming to Firefly-iii and Beancount patterns:
- * All monetary amounts are stored as exact integers in minor units (kopecks, cents).
- * Floating point operations are strictly prohibited for balances and totals.
+ * All monetary amounts are exact integers in minor units (kopecks, cents).
+ * Floating point arithmetic is never used for balances and totals.
  */
 
 export function kopecksToRubles(kopecks: number): number {
@@ -51,28 +50,15 @@ export function formatMoneyCompact(kopecks: number, currency: Currency = 'RUB'):
 }
 
 /**
- * Parse user entered string (e.g., "540", "1 250,50", "45.90") into minor units (integer kopecks)
+ * Parse an amount typed by a person ("540", "1 250,50", "45.9", "1500 ₽") into integer kopecks.
+ * Strict: digits with at most two decimals. Garbage ("12abc", "1e3", "-5", "1,234") gives null.
+ * The arithmetic is done on integers, no float rounding.
  */
 export function parseAmountToKopecks(input: string): number | null {
   if (!input) return null;
-  // Clean spaces and currency symbols
-  const cleaned = input.replace(/\s+/g, '').replace(/[₽$€]/g, '').replace(',', '.');
-  const parsed = parseFloat(cleaned);
-  if (isNaN(parsed) || parsed < 0) return null;
-  return Math.round(parsed * 100);
-}
-
-/**
- * Fair split of minor units among N participants with zero penny loss (Beancount pattern).
- * Example: 100 kopecks split 3 ways yields [34, 33, 33].
- */
-export function splitKopecksFairly(totalKopecks: number, count: number): number[] {
-  if (count <= 0) return [];
-  const base = Math.floor(totalKopecks / count);
-  const remainder = totalKopecks % count;
-  const result: number[] = [];
-  for (let i = 0; i < count; i++) {
-    result.push(base + (i < remainder ? 1 : 0));
-  }
-  return result;
+  const cleaned = input.replace(/[\s\u00a0\u202f]+/g, '').replace(/[₽$€]/g, '').replace(',', '.');
+  if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return null;
+  const [whole, fraction = ''] = cleaned.split('.');
+  const kopecks = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
+  return Number.isSafeInteger(kopecks) ? kopecks : null;
 }

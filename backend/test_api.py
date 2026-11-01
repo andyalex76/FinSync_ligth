@@ -266,7 +266,7 @@ async def test_healthz_endpoint_contract():
 
 @pytest.mark.asyncio
 async def test_removed_receipt_endpoints_are_gone():
-    """Receipt/OCR endpoints no longer exist (404 for authenticated and anonymous callers)."""
+    """Receipt/OCR, offline-sync and family-wizard endpoints no longer exist."""
     from httpx import ASGITransport, AsyncClient
     try:
         from backend.main import app
@@ -280,6 +280,10 @@ async def test_removed_receipt_endpoints_are_gone():
             ("POST", "/api/internal/documents/abc/status"),
             ("POST", "/api/internal/documents/abc/ocr-result"),
             ("POST", "/api/transactions/abc/confirm"),
+            # replaced by the server-rendered read-only dashboard and the Mini App entry form
+            ("POST", "/api/transactions/sync"),
+            ("POST", "/api/family/setup"),
+            ("POST", "/api/family/join"),
         ):
             resp = await client.request(method, url)
             assert resp.status_code in (404, 405), (method, url, resp.status_code)

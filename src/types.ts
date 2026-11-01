@@ -1,232 +1,131 @@
+/** Types of the JSON returned by the FinSync API. All money amounts are integer kopecks. */
+
 export type Currency = 'RUB' | 'USD' | 'EUR';
 
-export type TransactionType = 'expense' | 'income' | 'transfer' | 'saving';
-export type TransactionStatus = 'draft' | 'review_needed' | 'confirmed' | 'rejected';
-export type MemberRole = 'owner' | 'admin' | 'member';
-
-export interface User {
-  id: string;
-  telegramId?: number;
-  username?: string;
-  fullName: string;
-  avatarUrl?: string;
-  createdAt: string;
-}
-
-export interface Family {
-  id: string;
-  name: string;
-  currency: Currency;
-  inviteCode: string;
-  createdAt: string;
-}
-
-export interface FamilyMember {
-  id: string;
-  familyId: string;
-  userId: string;
-  name: string;
-  avatar: string;
-  role: MemberRole;
-  balanceKopecks: number; // in minor units
-  isCurrentUser?: boolean;
-  telegramUserId?: string | number;
-}
-
-export interface FamilySetupData {
-  familyId: string;
-  familyName: string;
-  currency: Currency;
-  inviteCode: string;
-  userName: string;
-  userRole: MemberRole;
-  userAvatar: string;
-  telegramUserId?: string;
-  additionalMembers?: Array<{
-    name: string;
-    role: MemberRole;
-    avatar: string;
-  }>;
-  startClean: boolean;
-}
+export type TransactionType = 'expense' | 'income' | 'transfer' | 'saving' | 'withdrawal';
 
 export interface Category {
   id: string;
-  familyId: string;
   name: string;
   icon: string;
   color: string;
-  parentId?: string | null;
-  subcategories?: string[];
-  monthlyBudgetKopecks?: number;
+  is_income: boolean;
+  sort_order: number;
+  monthly_limit_kopecks: number;
 }
 
-export interface Tag {
+export interface Member {
   id: string;
   name: string;
-  familyId: string;
+  avatar: string;
+  role: string;
+  /** Positive: others owe this member. Negative: this member owes others. */
+  balance_kopecks: number;
+  is_active: boolean;
 }
 
-export type SyncStatus = 'synced' | 'pending' | 'syncing' | 'failed';
-export type SyncAction = 'create' | 'update' | 'delete';
-
-export interface SyncQueueItem {
+export interface Goal {
   id: string;
-  transactionId: string;
-  action: SyncAction;
-  payload: Transaction;
-  queuedAt: string;
-  attempts: number;
-  lastError?: string;
+  name: string;
+  icon: string;
+  target_amount_kopecks: number;
+  target_date: string | null;
+  saved_kopecks: number;
+  remaining_kopecks: number;
+  progress_percent: number;
+  is_reached: boolean;
+  days_left: number | null;
+  is_overdue: boolean;
+  required_per_month_kopecks: number | null;
 }
 
-export interface TransactionSplit {
-  id: string;
-  transactionId: string;
-  memberId: string;
-  amountKopecks: number;
+export interface DashboardBudget {
+  category_id: string;
+  name: string;
+  icon: string;
+  color: string;
+  limit_kopecks: number;
+  spent_kopecks: number;
+  remaining_kopecks: number;
+  percent: number;
+  is_over: boolean;
 }
 
-export interface Transaction {
+export interface DashboardForecast {
+  current_month: string;
+  days_passed: number;
+  days_total: number;
+  days_remaining: number;
+  actual_spent_kopecks: number;
+  daily_average_kopecks: number;
+  projected_spent_kopecks: number;
+  total_budget_kopecks: number;
+  variance_kopecks: number;
+  is_over_budget: boolean;
+  has_budget: boolean;
+}
+
+export interface DashboardTransaction {
   id: string;
-  familyId: string;
+  date: string;
   type: TransactionType;
-  amountKopecks: number; // Stored in minor units (kopecks/cents)
-  currency: Currency;
-  categoryId: string;
-  subCategory?: string;
-  paidByMemberId: string;
+  amount_kopecks: number;
   description: string;
-  date: string; // ISO date YYYY-MM-DD
-  status: TransactionStatus;
-  tags: string[];
-  documentId?: string | null;
-  splits?: TransactionSplit[];
-  createdAt: string;
-  syncStatus?: SyncStatus;
-  syncedAt?: string;
+  category_name: string | null;
+  paid_by_name: string | null;
+  to_name: string | null;
+  goal_name: string | null;
 }
 
-export interface Budget {
-  id: string;
-  familyId: string;
-  categoryId: string;
-  month: string; // YYYY-MM
-  limitKopecks: number;
-  spentKopecks: number;
-  notifyThresholdPercent: number;
+export interface Settlement {
+  debtor_member_id: string;
+  creditor_member_id: string;
+  amount_kopecks: number;
+  debtor_name: string;
+  creditor_name: string;
 }
 
-export type DocumentProcessingStatus = 'pending' | 'processing' | 'review_needed' | 'confirmed' | 'failed';
-
-export interface DocumentLineItem {
+export interface DashboardMember {
   id: string;
   name: string;
-  quantity: number;
-  unitPriceKopecks: number;
-  totalKopecks: number;
+  avatar: string;
+  balance_kopecks: number;
 }
 
-export interface DocumentExtraction {
-  id: string;
-  documentId: string;
-  merchantName?: string;
-  merchantInn?: string;
-  receiptDate?: string;
-  totalAmountKopecks?: number;
-  confidenceScore: number; // 0.0 - 1.0
-  suggestedCategoryId?: string;
-  rawText: string;
-  lineItems: DocumentLineItem[];
-}
-
-export interface Document {
-  id: string;
-  familyId: string;
-  uploadedByMemberId: string;
-  fileName: string;
-  fileUrl?: string;
-  fileSize: number;
-  mimeType: string;
-  status: DocumentProcessingStatus;
-  extraction?: DocumentExtraction;
-  transactionDraftId?: string;
-  createdAt: string;
-}
-
-export interface MonthlyForecast {
-  currentMonth: string; // YYYY-MM
-  daysPassed: number;
-  daysTotal: number;
-  daysRemaining: number;
-  actualSpentKopecks: number;
-  dailyAverageKopecks: number;
-  projectedSpentKopecks: number;
-  totalBudgetKopecks: number;
-  varianceKopecks: number; // projected - budget
-  isOverBudget: boolean;
-}
-
-export interface TelegramDraft {
-  type?: 'expense' | 'income' | 'saving' | 'transfer';
-  amountKopecks: number;
-  description: string;
-  categoryId: string;
-  goalId?: string;
-  subCategory?: string;
-}
-
-export interface TelegramBotMessage {
-  id: string;
-  sender: 'user' | 'bot';
-  text?: string;
-  photoUrl?: string;
-  time: string;
-  buttons?: { label: string; callbackData: string; style?: 'primary' | 'danger' | 'default' }[];
-  draftCard?: {
-    merchant: string;
-    amountKopecks: number;
-    category: string;
-    date: string;
-    confidence: number;
-    draftId: string;
+export interface Dashboard {
+  generated_at: string;
+  period: string;
+  totals: {
+    income_kopecks: number;
+    expenses_kopecks: number;
+    saved_kopecks: number;
+    balance_kopecks: number;
   };
+  forecast: DashboardForecast;
+  budgets: DashboardBudget[];
+  unbudgeted_spent_kopecks: number;
+  goals: Goal[];
+  recent_transactions: DashboardTransaction[];
+  members: DashboardMember[];
+  settlements: Settlement[];
 }
 
-export interface MerchantRule {
+/** Body of POST /api/transactions. */
+export interface NewTransaction {
+  type: TransactionType;
+  amount_kopecks: number;
+  description: string;
+  transaction_date: string;
+  currency?: Currency;
+  category_id?: string;
+  paid_by_member_id?: string;
+  to_member_id?: string;
+  goal_id?: string;
+}
+
+export interface CreatedTransaction {
   id: string;
-  pattern: string; // e.g. "вкусвилл", "лукойл"
-  categoryId: string;
-  subCategory?: string;
-  matchCount: number;
-  updatedAt: string;
-}
-
-export type PeriodFilter = 'current_month' | 'prev_month' | 'quarter' | 'year' | 'all';
-
-export interface SettlementProposal {
-  fromMemberId: string;
-  toMemberId: string;
-  amountKopecks: number;
-}
-
-export type SavingsAccountType = 'deposit' | 'savings_account' | 'investment' | 'cash';
-
-export interface SavingsGoal {
-  id: string;
-  familyId: string;
-  name: string;
-  description?: string;
-  targetKopecks: number;
-  currentKopecks: number;
-  currency: Currency;
-  accountType: SavingsAccountType;
-  bankName: string;
-  interestRate?: number; // annual % e.g. 18.5
-  icon: string;
-  color: string;
-  targetDate?: string; // YYYY-MM-DD
-  monthlyPlanKopecks?: number;
-  createdAt: string;
-  isArchived?: boolean;
+  type: TransactionType;
+  amount_kopecks: number;
+  description: string;
 }
