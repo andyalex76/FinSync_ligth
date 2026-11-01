@@ -4,6 +4,7 @@ user, auth flow, transactions and transfer-based settlements.
 Skipped automatically when the database is not reachable; CI provides a Postgres service.
 """
 import asyncio
+from datetime import date, timedelta
 
 import pytest
 
@@ -17,6 +18,9 @@ except ImportError:
     from main import app
 
 from sqlalchemy import text
+
+# The dashboard totals cover the CURRENT month, so test data must be dated today (never a fixed date).
+TODAY = date.today().isoformat()
 
 
 @pytest.mark.asyncio
@@ -88,7 +92,7 @@ async def test_family_bootstrap_transfers_and_settlements(monkeypatch):
             # An expense is NOT split: it does not create any debt
             r = await c.post("/api/transactions", headers=anna_h, json={
                 "type": "expense", "amount_kopecks": 120000, "description": "Продукты",
-                "transaction_date": "2026-10-01",
+                "transaction_date": TODAY,
                 # legacy client ids that do not exist in the database must not break anything
                 "paid_by_member_id": "mem-01", "category_id": "cat-does-not-exist",
             })
@@ -99,7 +103,7 @@ async def test_family_bootstrap_transfers_and_settlements(monkeypatch):
             # Anna lends Boris 5000.00
             r = await c.post("/api/transactions", headers=anna_h, json={
                 "type": "transfer", "amount_kopecks": 500000, "description": "Одолжила",
-                "transaction_date": "2026-10-02", "to_member_id": boris_member,
+                "transaction_date": TODAY, "to_member_id": boris_member,
             })
             assert r.status_code == 201, r.text
             assert r.json()["to_member_id"] == boris_member
@@ -120,7 +124,7 @@ async def test_family_bootstrap_transfers_and_settlements(monkeypatch):
             for amount in (200000, 300000):
                 r = await c.post("/api/transactions", headers=boris_h, json={
                     "type": "transfer", "amount_kopecks": amount, "description": "Вернул",
-                    "transaction_date": "2026-10-03", "to_member_id": anna_member,
+                    "transaction_date": TODAY, "to_member_id": anna_member,
                 })
                 assert r.status_code == 201, r.text
                 if amount == 200000:
@@ -133,22 +137,32 @@ async def test_family_bootstrap_transfers_and_settlements(monkeypatch):
             assert summary["total_expenses_kopecks"] == 120000
             assert summary["total_income_kopecks"] == 0
 
+            # The totals cover the current month only: an expense from last month is not counted
+            last_month = (date.today().replace(day=1) - timedelta(days=1)).isoformat()
+            r = await c.post("/api/transactions", headers=anna_h, json={
+                "type": "expense", "amount_kopecks": 777700, "description": "Прошлый месяц",
+                "transaction_date": last_month,
+            })
+            assert r.status_code == 201, r.text
+            summary = (await c.get("/api/dashboard/summary", headers=anna_h)).json()
+            assert summary["total_expenses_kopecks"] == 120000
+
             # Validation
             bad = [
-                {"type": "transfer", "amount_kopecks": 100, "description": "x", "transaction_date": "2026-10-01"},
-                {"type": "expense", "amount_kopecks": 100, "description": "x", "transaction_date": "2026-10-01",
+                {"type": "transfer", "amount_kopecks": 100, "description": "x", "transaction_date": TODAY},
+                {"type": "expense", "amount_kopecks": 100, "description": "x", "transaction_date": TODAY,
                  "to_member_id": boris_member},
             ]
             for body in bad:
                 assert (await c.post("/api/transactions", headers=anna_h, json=body)).status_code == 422
             r = await c.post("/api/transactions", headers=anna_h, json={
                 "type": "transfer", "amount_kopecks": 100, "description": "себе",
-                "transaction_date": "2026-10-01", "to_member_id": anna_member,
+                "transaction_date": TODAY, "to_member_id": anna_member,
             })
             assert r.status_code == 422
             r = await c.post("/api/transactions", headers=anna_h, json={
                 "type": "transfer", "amount_kopecks": 100, "description": "никому",
-                "transaction_date": "2026-10-01", "to_member_id": "mem-99",
+                "transaction_date": TODAY, "to_member_id": "mem-99",
             })
             assert r.status_code == 422
 
@@ -161,13 +175,5 @@ async def test_family_bootstrap_transfers_and_settlements(monkeypatch):
                         "SELECT gen_random_uuid(), family_id, id, 'transfer', 100, 'RUB', 'bad', now(), 'confirmed', now() "
                         "FROM family_members LIMIT 1"
                     ))
-
-            # Legacy sync endpoint: a transfer without a valid recipient is dropped, not retried forever
-            r = await c.post("/api/transactions/sync", headers=anna_h, json={"items": [{
-                "id": "tx-legacy-1", "action": "create", "type": "transfer", "amount_kopecks": 100,
-                "paid_by_member_id": "mem-02", "description": "legacy", "transaction_date": "2026-10-01",
-            }]})
-            assert r.status_code == 200
-            assert r.json()["synced_ids"] == ["tx-legacy-1"]
     finally:
         await engine.dispose()

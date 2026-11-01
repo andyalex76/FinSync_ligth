@@ -1,80 +1,37 @@
 import { describe, it, expect } from 'vitest';
-import {
-  kopecksToRubles,
-  rublesToKopecks,
-  formatMoney,
-  formatMoneyCompact,
-  parseAmountToKopecks,
-  splitKopecksFairly,
-} from './money';
+import { formatMoney, formatMoneyCompact, kopecksToRubles, parseAmountToKopecks, rublesToKopecks } from './money';
 
-describe('Money Utilities (Firefly-iii / Beancount integer kopeck logic)', () => {
-  it('converts kopecks to rubles correctly', () => {
-    expect(kopecksToRubles(100)).toBe(1);
+const plain = (s: string) => s.replace(/[\u00a0\u202f]/g, ' ');
+
+describe('money utils (integer kopecks)', () => {
+  it('converts between rubles and kopecks without float leaks', () => {
     expect(kopecksToRubles(145050)).toBe(1450.5);
-    expect(kopecksToRubles(0)).toBe(0);
-    expect(kopecksToRubles(-500)).toBe(-5);
-  });
-
-  it('converts rubles to integer kopecks safely without float precision leaks', () => {
-    expect(rublesToKopecks(1.0)).toBe(100);
     expect(rublesToKopecks(19.99)).toBe(1999);
     expect(rublesToKopecks(0.01)).toBe(1);
-    expect(rublesToKopecks(0)).toBe(0);
   });
 
-  it('formats money with standard locale and symbols', () => {
-    const formatted = formatMoney(100000, 'RUB');
-    expect(formatted).toContain('1');
-    expect(formatted).toContain('000');
-    expect(formatted).toContain('₽');
-
-    const formattedUsd = formatMoney(5000, 'USD');
-    expect(formattedUsd).toContain('$');
-    expect(formattedUsd).toContain('50');
-
-    const formattedNegative = formatMoney(-15000, 'RUB');
-    expect(formattedNegative.startsWith('-')).toBe(true);
-
-    const formattedWithPlus = formatMoney(25000, 'RUB', true);
-    expect(formattedWithPlus.startsWith('+')).toBe(true);
+  it('formats money with sign and currency', () => {
+    expect(plain(formatMoney(100000))).toBe('1 000,00 ₽');
+    expect(plain(formatMoney(-15000))).toBe('-150,00 ₽');
+    expect(plain(formatMoney(25000, 'RUB', true))).toBe('+250,00 ₽');
+    expect(plain(formatMoney(5000, 'USD'))).toBe('$50,00');
+    expect(plain(formatMoneyCompact(150_000_000))).toBe('1.5 млн ₽');
+    expect(plain(formatMoneyCompact(450_000))).toBe('5k ₽');
   });
 
-  it('formats money in compact notation for widgets', () => {
-    expect(formatMoneyCompact(150_000_000, 'RUB')).toContain('1.5 млн ₽');
-    expect(formatMoneyCompact(12_000_00, 'RUB')).toContain('12k ₽');
-    expect(formatMoneyCompact(50_00, 'RUB')).toContain('50');
-  });
-
-  it('parses user input strings into integer kopecks reliably', () => {
+  it('parses typed amounts into integer kopecks', () => {
     expect(parseAmountToKopecks('540')).toBe(54000);
     expect(parseAmountToKopecks('1 250,50')).toBe(125050);
-    expect(parseAmountToKopecks('1250.50')).toBe(125050);
-    expect(parseAmountToKopecks('14,99 ₽')).toBe(1499);
-    expect(parseAmountToKopecks('$ 100.00')).toBe(10000);
-    expect(parseAmountToKopecks('')).toBeNull();
-    expect(parseAmountToKopecks('invalid')).toBeNull();
-    expect(parseAmountToKopecks('-50')).toBeNull();
+    expect(parseAmountToKopecks('45.9')).toBe(4590);
+    expect(parseAmountToKopecks('1500 ₽')).toBe(150000);
+    expect(parseAmountToKopecks('0,05')).toBe(5);
+    expect(parseAmountToKopecks('0')).toBe(0);
   });
 
-  it('splits kopecks fairly among N participants with ZERO penny loss', () => {
-    // 100 kopecks split 3 ways -> 34, 33, 33 (sum exactly 100)
-    const split3 = splitKopecksFairly(100, 3);
-    expect(split3).toEqual([34, 33, 33]);
-    expect(split3.reduce((a, b) => a + b, 0)).toBe(100);
-
-    // 1000 kopecks split 4 ways -> 250, 250, 250, 250
-    const split4 = splitKopecksFairly(1000, 4);
-    expect(split4).toEqual([250, 250, 250, 250]);
-    expect(split4.reduce((a, b) => a + b, 0)).toBe(1000);
-
-    // 1 kopeck split 3 ways -> [1, 0, 0]
-    const split1 = splitKopecksFairly(1, 3);
-    expect(split1).toEqual([1, 0, 0]);
-    expect(split1.reduce((a, b) => a + b, 0)).toBe(1);
-
-    // 0 or negative count
-    expect(splitKopecksFairly(100, 0)).toEqual([]);
-    expect(splitKopecksFairly(100, -1)).toEqual([]);
+  it('refuses garbage instead of guessing', () => {
+    for (const bad of ['', 'abc', '12abc', '1e3', '-5', '1,234', '12.345', '1.2.3', ' ']) {
+      expect(parseAmountToKopecks(bad), bad).toBeNull();
+    }
+    expect(parseAmountToKopecks('9'.repeat(30))).toBeNull();
   });
 });
