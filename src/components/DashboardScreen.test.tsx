@@ -8,6 +8,7 @@ vi.mock('../api', async () => {
 });
 
 import { ApiError, getDashboard } from '../api';
+import * as auth from '../utils/auth';
 import { DashboardScreen } from './DashboardScreen';
 
 const getDashboardMock = vi.mocked(getDashboard);
@@ -33,6 +34,22 @@ describe('DashboardScreen', () => {
     await screen.findByText('Нужен вход через Telegram');
     expect(document.body.textContent).toContain('/dashboard');
     expect(screen.queryByText('Бюджеты по категориям')).toBeNull();
+  });
+
+  it('says the account has no access when sign-in was refused', async () => {
+    getDashboardMock.mockRejectedValue(new ApiError(403, 'Доступ запрещён'));
+    vi.spyOn(auth, 'getAuthProblem').mockReturnValue('forbidden');
+    renderScreen();
+    await screen.findByText('Нет доступа');
+    expect(document.body.textContent).toContain('не входит в список доступа');
+  });
+
+  it('says the link is no longer valid when the one-time link was rejected', async () => {
+    getDashboardMock.mockRejectedValue(new ApiError(401, 'x'));
+    vi.spyOn(auth, 'getAuthProblem').mockReturnValue('link');
+    renderScreen();
+    await screen.findByText('Нужен вход через Telegram');
+    expect(document.body.textContent).toContain('недействительна, устарела или уже использована');
   });
 
   it('shows an error with a retry button when the first load fails', async () => {

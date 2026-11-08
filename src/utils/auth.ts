@@ -7,30 +7,39 @@
  *  2. In a browser: open the link from the bot's /dashboard command. It carries a
  *     one-time `?login=<code>` that is exchanged for a session token and removed from the URL.
  *
+ * Inside Telegram a stored token is never reused: every launch signs in again with fresh initData,
+ * so a session that went stale (database recreated, access revoked) can never get stuck.
+ * In a browser the token from the one-time link is kept (it is the only way to prove who you are).
+ *
  * All callers share one in-flight sign-in, so a one-time code is never exchanged twice
  * (several requests start at once, and React StrictMode mounts effects twice in development).
  */
 
-const TOKEN_STORAGE_KEY = 'family_budget_jwt_token';
+// A new key on purpose: tokens stored by older versions of the app must never be reused.
+const TOKEN_STORAGE_KEY = 'finsync_session_v2';
+
+/** Why the last sign-in failed, so the screen can say something more useful than "sign in". */
+export type AuthProblem = 'link' | 'forbidden' | null;
 
 let cachedToken: string | null = null;
 let pendingSignIn: Promise<string> | null = null;
+let lastProblem: AuthProblem = null;
 
 interface TokenResponse {
   access_token?: string;
 }
 
-async function requestToken(url: string, body: Record<string, string>): Promise<string> {
+async function requestToken(url: string, body: Record<string, string>): Promise<{ token: string; status: number }> {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    return '';
+    return { token: '', status: res.status };
   }
   const data = (await res.json()) as TokenResponse;
-  return typeof data.access_token === 'string' ? data.access_token : '';
+  return { token: typeof data.access_token === 'string' ? data.access_token : '', status: res.status };
 }
 
 function takeLoginCodeFromUrl(): string | null {
@@ -63,32 +72,44 @@ function storeToken(token: string): void {
 }
 
 async function signIn(): Promise<string> {
+  if (cachedToken) return cachedToken;
+
+  // 1. One-time link from the bot (browser).
   const loginCode = takeLoginCodeFromUrl();
   if (loginCode) {
     clearAuthToken();
-    const token = await requestToken('/api/auth/exchange', { code: loginCode }).catch(() => '');
+    const { token } = await requestToken('/api/auth/exchange', { code: loginCode }).catch(() => ({ token: '', status: 0 }));
     if (token) {
+      lastProblem = null;
       storeToken(token);
       return token;
     }
+    lastProblem = 'link';
   }
 
-  if (cachedToken) return cachedToken;
+  // 2. Inside Telegram: always sign in with fresh signed initData, never with a stored token.
+  const initData = window.Telegram?.WebApp?.initData;
+  if (initData) {
+    const { token, status } = await requestToken('/api/auth/telegram', { init_data: initData }).catch((err) => {
+      console.warn('[Auth] Telegram authentication failed:', err);
+      return { token: '', status: 0 };
+    });
+    if (token) {
+      lastProblem = null;
+      cachedToken = token; // kept for this launch only
+      return token;
+    }
+    lastProblem = status === 403 ? 'forbidden' : lastProblem;
+    return '';
+  }
+
+  // 3. Browser: the token saved after a successful one-time link.
   const stored = readStoredToken();
   if (stored) {
     cachedToken = stored;
     return stored;
   }
-
-  const initData = window.Telegram?.WebApp?.initData;
-  if (!initData) return '';
-
-  const token = await requestToken('/api/auth/telegram', { init_data: initData }).catch((err) => {
-    console.warn('[Auth] Telegram authentication failed:', err);
-    return '';
-  });
-  if (token) storeToken(token);
-  return token;
+  return '';
 }
 
 /** The active JWT, signing in if needed. Returns '' when the user is not authenticated. */
@@ -99,6 +120,11 @@ export function getAuthToken(): Promise<string> {
     });
   }
   return pendingSignIn;
+}
+
+/** Why the last sign-in failed (null if it did not, or was not attempted). */
+export function getAuthProblem(): AuthProblem {
+  return lastProblem;
 }
 
 /** Forget the stored token (logout, or the server rejected it). */
@@ -125,8 +151,8 @@ export async function getCurrentMemberId(): Promise<string | null> {
 }
 
 /**
- * fetch() with the Bearer token. On 401 it signs in once more (inside Telegram a fresh initData
- * works; in a browser the person has to open a new link from the bot).
+ * fetch() with the Bearer token. On 401/403 it signs in once more: inside Telegram that uses fresh
+ * initData (fixes stale sessions); in a browser the person has to open a new link from the bot.
  */
 export async function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const send = async (token: string) => {
@@ -136,7 +162,7 @@ export async function authFetch(input: RequestInfo | URL, init?: RequestInit): P
   };
 
   const response = await send(await getAuthToken());
-  if (response.status !== 401) return response;
+  if (response.status !== 401 && response.status !== 403) return response;
 
   clearAuthToken();
   const fresh = await getAuthToken();
@@ -147,4 +173,5 @@ export async function authFetch(input: RequestInfo | URL, init?: RequestInit): P
 export function __resetAuthForTests(): void {
   cachedToken = null;
   pendingSignIn = null;
+  lastProblem = null;
 }

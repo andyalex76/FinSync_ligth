@@ -177,3 +177,54 @@ async def test_family_bootstrap_transfers_and_settlements(monkeypatch):
                     ))
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stale_session_claims_do_not_break_writes(monkeypatch):
+    """
+    A token issued before the database was recreated still carries old user_id/member_id claims.
+    The acting member must be found by the Telegram ID, never by those claims.
+    """
+    import uuid
+
+    from httpx import ASGITransport, AsyncClient
+
+    try:
+        from backend.auth import create_access_token
+    except ImportError:
+        from auth import create_access_token
+
+    await db_or_skip()
+    never_logged_in = 424242777  # no other test ever signs this ID in
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", f"{ANNA},{never_logged_in}")
+    try:
+        await migrate_to_head()
+        await wipe_operations()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as c:
+            _, anna_member = await login(c, ANNA, "Анна")
+
+            stale = create_access_token(
+                telegram_id=ANNA,
+                user_id=str(uuid.uuid4()),
+                extra_claims={"family_id": str(uuid.uuid4()), "member_id": str(uuid.uuid4())},
+            )
+            r = await c.post(
+                "/api/transactions",
+                headers={"Authorization": f"Bearer {stale}"},
+                json={"type": "expense", "amount_kopecks": 54000, "description": "Кофе", "transaction_date": TODAY},
+            )
+            assert r.status_code == 201, r.text
+            assert r.json()["paid_by_member_id"] == anna_member  # found by Telegram ID, not by the stale claims
+
+            # Allowed Telegram ID that has never logged in (e.g. the database was recreated):
+            # 401 makes the client sign in again instead of the confusing "you are not in the family".
+            stranger = create_access_token(telegram_id=never_logged_in)
+            r = await c.post(
+                "/api/transactions",
+                headers={"Authorization": f"Bearer {stranger}"},
+                json={"type": "expense", "amount_kopecks": 100, "description": "x", "transaction_date": TODAY},
+            )
+            assert r.status_code == 401
+            assert "войдите заново" in r.json()["detail"]
+    finally:
+        await engine.dispose()
