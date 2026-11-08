@@ -923,6 +923,30 @@ async def _find_member(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def _member_of_token(
+    session: AsyncSession, family: Family, token_data: Dict[str, Any]
+) -> Optional[FamilyMember]:
+    """
+    The family member behind the session, found by the Telegram ID in the token.
+    The token's other claims (user_id, member_id) are NOT trusted: they go stale when the database is
+    recreated or a member is replaced, while the Telegram ID (checked against the allowlist) does not.
+    """
+    try:
+        telegram_id = int(token_data.get("telegram_id"))
+    except (TypeError, ValueError):
+        return None
+    stmt = (
+        select(FamilyMember)
+        .join(User, User.id == FamilyMember.user_id)
+        .where(
+            User.telegram_id == telegram_id,
+            FamilyMember.family_id == family.id,
+            FamilyMember.is_active.is_(True),
+        )
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 async def _resolve_payer(
     session: AsyncSession,
     family: Family,
@@ -930,23 +954,18 @@ async def _resolve_payer(
     token_data: Dict[str, Any],
 ) -> FamilyMember:
     """
-    Payer = the member the client names (if it really exists), otherwise the member of the
-    authenticated user. This also keeps old clients that still send demo ids ('mem-01') working.
+    Payer = the member the client names (if it really exists in this family), otherwise the member
+    behind the session. If there is none, the session is stale: answer 401 so that the client signs in
+    again (inside Telegram that happens automatically and creates the membership).
     """
     member = await _find_member(session, family, supplied)
     if member is None:
-        member = await _find_member(session, family, token_data.get("member_id"))
-    if member is None and token_data.get("user_id"):
-        stmt = select(FamilyMember).where(
-            FamilyMember.family_id == family.id,
-            FamilyMember.user_id == to_uuid(token_data["user_id"]),
-            FamilyMember.is_active.is_(True),
-        )
-        member = (await session.execute(stmt)).scalar_one_or_none()
+        member = await _member_of_token(session, family, token_data)
     if member is None:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Вы не состоите в семье: отправьте /start боту",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Сессия устарела: войдите заново (откройте приложение из чата с ботом)",
+            headers={"WWW-Authenticate": "Bearer"},
         )
     return member
 

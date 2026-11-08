@@ -12,7 +12,10 @@ vi.mock('./api', async () => {
     getGoals: vi.fn(),
   };
 });
-vi.mock('./utils/auth', () => ({ getCurrentMemberId: vi.fn().mockResolvedValue('m-anna') }));
+vi.mock('./utils/auth', () => ({
+  getCurrentMemberId: vi.fn().mockResolvedValue('m-anna'),
+  getAuthProblem: vi.fn().mockReturnValue(null),
+}));
 
 import { ApiError, getCategories, getDashboard, getGoals, getMembers } from './api';
 import App from './App';
